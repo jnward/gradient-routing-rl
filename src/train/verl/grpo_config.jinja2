@@ -25,6 +25,10 @@ actor_rollout_ref:
         enable_gradient_checkpointing: {{ enable_gradient_checkpointing }}
         use_shm: true
         use_fused_kernels: true
+        gradient_routing:
+            enabled: {{ gradient_routing_enabled }}
+            label_field: {{ gradient_routing_label_field }}
+            label_subsample_rate: {{ gradient_routing_label_subsample_rate }}
     actor:
         strategy: fsdp2
         optim:

@@ -88,6 +88,13 @@ class HFModelConfig(BaseConfig):
     use_fused_kernels: bool = False
     fused_kernel_options: dict = field(default_factory=dict)
 
+    # Gradient routing configuration for dual-adapter training
+    gradient_routing: dict = field(default_factory=lambda: {
+        "enabled": False,
+        "label_field": "is_reward_hack_strict",
+        "label_subsample_rate": 0.5,
+    })
+
     architectures: Optional[list[str]] = None
 
     def __post_init__(self):

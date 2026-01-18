@@ -183,6 +183,11 @@ class GRPOConfig(TrainingConfig):
     # Screening-related
     fill_nan_global: bool = True # Fill nan's with global mean and std; useful when batch size is small
 
+    # Gradient Routing Configuration
+    gradient_routing_enabled: bool = False
+    gradient_routing_label_field: str = "is_reward_hack_strict"  # or "is_reward_hack_loose"
+    gradient_routing_label_subsample_rate: float = 0.5  # Simulate imperfect recall (50% default)
+
     # TRL Only Parameters
     log_completions: bool = True # Always true in verl
     dataloader_prefetch_factor: int = 2 # Prefetch batches to reduce GPU idle time

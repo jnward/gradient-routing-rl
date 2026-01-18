@@ -411,6 +411,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             print("Applying LoRA to actor module")
             actor_module.enable_input_require_grads()
 
+            # Check if gradient routing is enabled
+            gradient_routing_config = self.config.model.get("gradient_routing", {})
+            gradient_routing_enabled = gradient_routing_config.get("enabled", False)
+
             lora_adapter_path = self.config.model.get("lora_adapter_path")
             if lora_adapter_path is not None:
                 from peft import PeftModel
@@ -428,7 +432,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             else:
                 # Convert config to regular Python types before creating PEFT model
-                lora_config = {
+                lora_config_dict = {
                     "task_type": TaskType.CAUSAL_LM,
                     "r": self.config.model.lora_rank,
                     "lora_alpha": self.config.model.lora_alpha,
@@ -436,7 +440,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "exclude_modules": convert_to_regular_types(self.config.model.exclude_modules),
                     "bias": "none",
                 }
-                actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+                lora_config = LoraConfig(**lora_config_dict)
+
+                if gradient_routing_enabled and role == "actor":
+                    # Gradient routing: create two adapters ("retain" and "forget")
+                    print("Gradient routing enabled: creating 'retain' and 'forget' adapters")
+                    actor_module = get_peft_model(actor_module, lora_config, adapter_name="retain")
+                    actor_module.add_adapter("forget", lora_config)
+                    actor_module.set_adapter("retain")  # Default to retain
+                else:
+                    # Standard single adapter
+                    actor_module = get_peft_model(actor_module, lora_config)
 
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
         if self.config.actor.get("freeze_vision_tower", False):
@@ -537,10 +551,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
 
         # TODO: add more optimizer args into config
+        # Initialize gradient routing optimizers to None
+        self.retain_optimizer = None
+        self.forget_optimizer = None
+        self.retain_lr_scheduler = None
+        self.forget_lr_scheduler = None
+        self.gradient_routing_enabled = False
+
         if role == "actor" and optim_config is not None:
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
-
-            actor_optimizer = build_optimizer(actor_module_fsdp.parameters(), optim_config)
 
             total_steps = optim_config.get("total_training_steps", 0)
             num_warmup_steps = int(optim_config.get("lr_warmup_steps", -1))
@@ -554,20 +573,55 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if self.rank == 0:
                 print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
 
-            if lr_scheduler_type == "constant":
-                actor_lr_scheduler = get_constant_schedule_with_warmup(
-                    optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps
-                )
-            elif lr_scheduler_type == "cosine":
-                actor_lr_scheduler = get_cosine_schedule_with_warmup(
-                    optimizer=actor_optimizer,
-                    num_warmup_steps=num_warmup_steps,
-                    num_training_steps=total_steps,
-                    min_lr_ratio=min_lr_ratio,
-                    num_cycles=num_cycles,
-                )
+            def create_scheduler(optimizer):
+                """Helper to create scheduler with same config."""
+                if lr_scheduler_type == "constant":
+                    return get_constant_schedule_with_warmup(
+                        optimizer=optimizer, num_warmup_steps=num_warmup_steps
+                    )
+                elif lr_scheduler_type == "cosine":
+                    return get_cosine_schedule_with_warmup(
+                        optimizer=optimizer,
+                        num_warmup_steps=num_warmup_steps,
+                        num_training_steps=total_steps,
+                        min_lr_ratio=min_lr_ratio,
+                        num_cycles=num_cycles,
+                    )
+                else:
+                    raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
+
+            # Check if gradient routing is enabled
+            gradient_routing_config = self.config.model.get("gradient_routing", {})
+            gradient_routing_enabled = gradient_routing_config.get("enabled", False) and self._is_lora
+
+            if gradient_routing_enabled:
+                # Gradient routing: create separate optimizers for each adapter
+                self.gradient_routing_enabled = True
+                print("Creating separate optimizers for gradient routing adapters")
+
+                # Get parameters for each adapter
+                retain_params = [p for n, p in actor_module_fsdp.named_parameters()
+                                 if "lora" in n.lower() and "retain" in n and p.requires_grad]
+                forget_params = [p for n, p in actor_module_fsdp.named_parameters()
+                                 if "lora" in n.lower() and "forget" in n and p.requires_grad]
+
+                if self.rank == 0:
+                    print(f"Retain adapter params: {len(retain_params)}")
+                    print(f"Forget adapter params: {len(forget_params)}")
+
+                self.retain_optimizer = build_optimizer(retain_params, optim_config)
+                self.forget_optimizer = build_optimizer(forget_params, optim_config)
+
+                self.retain_lr_scheduler = create_scheduler(self.retain_optimizer)
+                self.forget_lr_scheduler = create_scheduler(self.forget_optimizer)
+
+                # Set actor_optimizer to None (we use separate optimizers)
+                actor_optimizer = None
+                actor_lr_scheduler = None
             else:
-                raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
+                # Standard single optimizer
+                actor_optimizer = build_optimizer(actor_module_fsdp.parameters(), optim_config)
+                actor_lr_scheduler = create_scheduler(actor_optimizer)
 
             log_gpu_memory_usage(f"After {role} optimizer init", logger=logger)
         else:
@@ -660,14 +714,54 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         peft_config = None
         peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         if hasattr(peft_model, "peft_config"):  # LoRA
-            peft_config = peft_model.peft_config.get("default", None)
-            params = collect_lora_params(
-                module=self.actor_module_fsdp,
-                layered_summon=self.config.rollout.get("layered_summon", False),
-                base_sync_done=self.base_sync_done,
-            )
-            if not self.base_sync_done:
-                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            if self.gradient_routing_enabled:
+                # Gradient routing: combine weights from both adapters
+                # Get peft_config from "retain" adapter (configs are identical)
+                peft_config = peft_model.peft_config.get("retain", None)
+
+                # Collect params from retain adapter
+                peft_model.set_adapter("retain")
+                retain_params = collect_lora_params(
+                    module=self.actor_module_fsdp,
+                    layered_summon=self.config.rollout.get("layered_summon", False),
+                    base_sync_done=self.base_sync_done,
+                )
+
+                # Collect params from forget adapter
+                peft_model.set_adapter("forget")
+                forget_params = collect_lora_params(
+                    module=self.actor_module_fsdp,
+                    layered_summon=self.config.rollout.get("layered_summon", False),
+                    base_sync_done=self.base_sync_done,
+                )
+
+                # Sum the LoRA weights (additive combination for on-policy rollouts)
+                params = {}
+                for key in retain_params:
+                    if key in forget_params:
+                        params[key] = retain_params[key] + forget_params[key]
+                    else:
+                        params[key] = retain_params[key]
+                # Include any keys only in forget_params (shouldn't happen but be safe)
+                for key in forget_params:
+                    if key not in params:
+                        params[key] = forget_params[key]
+
+                # Reset to retain adapter as default
+                peft_model.set_adapter("retain")
+
+                if not self.base_sync_done:
+                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            else:
+                # Standard single adapter
+                peft_config = peft_model.peft_config.get("default", None)
+                params = collect_lora_params(
+                    module=self.actor_module_fsdp,
+                    layered_summon=self.config.rollout.get("layered_summon", False),
+                    base_sync_done=self.base_sync_done,
+                )
+                if not self.base_sync_done:
+                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
             params = self.actor_module_fsdp.state_dict()
 
@@ -751,7 +845,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from verl.workers.actor import DataParallelPPOActor
+        from verl.workers.actor import DataParallelPPOActor, GradientRoutingPPOActor
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
@@ -804,9 +898,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if self._is_actor:
             actor_cfg = omega_conf_to_dataclass(self.config.actor)
-            self.actor = DataParallelPPOActor(
-                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
-            )
+            if self.gradient_routing_enabled:
+                # Use gradient routing actor with two optimizers
+                self.actor = GradientRoutingPPOActor(
+                    config=actor_cfg,
+                    actor_module=self.actor_module_fsdp,
+                    retain_optimizer=self.retain_optimizer,
+                    forget_optimizer=self.forget_optimizer,
+                )
+            else:
+                # Standard actor with single optimizer
+                self.actor = DataParallelPPOActor(
+                    config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
+                )
 
         if self._is_rollout:
             self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
@@ -885,9 +989,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
             metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
-            lr = self.actor_lr_scheduler.get_last_lr()[0]
-            metrics["actor/lr"] = lr.item() if torch.is_tensor(lr) else lr
-            self.actor_lr_scheduler.step()
+            if self.gradient_routing_enabled:
+                # Step both schedulers for gradient routing
+                lr = self.retain_lr_scheduler.get_last_lr()[0]
+                metrics["actor/lr"] = lr.item() if torch.is_tensor(lr) else lr
+                self.retain_lr_scheduler.step()
+                self.forget_lr_scheduler.step()
+            else:
+                lr = self.actor_lr_scheduler.get_last_lr()[0]
+                metrics["actor/lr"] = lr.item() if torch.is_tensor(lr) else lr
+                self.actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
             output = DataProto(meta_info={"metrics": metrics})

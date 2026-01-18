@@ -584,6 +584,17 @@ class RHGRPORayTrainer(RayPPOTrainer):
                             batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
                             # TODO: Make "temperature" single source of truth from generation.
                             batch.meta_info["temperature"] = rollout_config.temperature
+
+                            # Inject gradient routing config into batch metadata
+                            gradient_routing_config = self.config.actor_rollout_ref.model.get("gradient_routing", {})
+                            if gradient_routing_config.get("enabled", False):
+                                batch.meta_info["gradient_routing_label_field"] = gradient_routing_config.get(
+                                    "label_field", "is_reward_hack_strict"
+                                )
+                                batch.meta_info["gradient_routing_label_subsample_rate"] = gradient_routing_config.get(
+                                    "label_subsample_rate", 1.0
+                                )
+
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

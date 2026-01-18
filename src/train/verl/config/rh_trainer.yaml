@@ -10,6 +10,11 @@ data:
   apply_chat_template_kwargs: {}
 
 actor_rollout_ref:
+  model:
+    gradient_routing:
+      enabled: false
+      label_field: "is_reward_hack_strict"
+      label_subsample_rate: 0.5
   rollout:
     engine_kwargs:
       vllm: {}
