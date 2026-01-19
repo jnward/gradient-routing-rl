@@ -443,11 +443,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 lora_config = LoraConfig(**lora_config_dict)
 
                 if gradient_routing_enabled and role == "actor":
-                    # Gradient routing: create two adapters ("retain" and "forget")
-                    print("Gradient routing enabled: creating 'retain' and 'forget' adapters")
+                    # Gradient routing: create BOTH adapters before FSDP2 wrapping
+                    # set_model_state_dict will load both correctly
                     actor_module = get_peft_model(actor_module, lora_config, adapter_name="retain")
                     actor_module.add_adapter("forget", lora_config)
-                    actor_module.set_adapter("retain")  # Default to retain
+                    # Use base_model.set_adapter() to set multiple adapters active
+                    actor_module.base_model.set_adapter(["retain", "forget"])
+
+                    # Ensure all params (including new LoRA adapters) have uniform dtype for FSDP2
+                    actor_module.to(torch_dtype)
+
+                    # DEBUG: Verify both adapters created BEFORE FSDP2 - ALL RANKS
+                    adapter_names = list(actor_module.peft_config.keys())
+                    active_adapters = getattr(actor_module, 'active_adapters', [actor_module.active_adapter])
+                    retain_count = sum(1 for n, _ in actor_module.named_parameters() if "retain" in n)
+                    forget_count = sum(1 for n, _ in actor_module.named_parameters() if "forget" in n)
+                    print(f"[RANK {self.rank}][BEFORE FSDP2] Gradient routing adapters: {adapter_names}")
+                    print(f"[RANK {self.rank}][BEFORE FSDP2] Active adapters: {active_adapters}")
+                    print(f"[RANK {self.rank}][BEFORE FSDP2] Parameter counts - retain: {retain_count}, forget: {forget_count}")
                 else:
                     # Standard single adapter
                     actor_module = get_peft_model(actor_module, lora_config)
@@ -539,8 +552,46 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "shard_placement_fn": get_shard_placement_fn(fsdp_size=self.device_mesh.shape[-1]),
             }
             full_state = actor_module.state_dict()
+
+            # DEBUG: Check state dict keys for both adapters - ALL RANKS
+            if gradient_routing_enabled:
+                retain_keys = [k for k in full_state.keys() if "retain" in k]
+                forget_keys = [k for k in full_state.keys() if "forget" in k]
+                print(f"[RANK {self.rank}][STATE_DICT] Keys with 'retain': {len(retain_keys)}, 'forget': {len(forget_keys)}")
+
             apply_fsdp2(actor_module, fsdp_kwargs, fsdp_config)
+
+            # DEBUG: Check model structure after apply_fsdp2 but before state dict load - ALL RANKS
+            if gradient_routing_enabled:
+                peft_model = getattr(actor_module, "_fsdp_wrapped_module", actor_module)
+                if hasattr(peft_model, "peft_config"):
+                    print(f"[RANK {self.rank}][AFTER apply_fsdp2] peft_config keys: {list(peft_model.peft_config.keys())}")
+                param_names = [n for n, _ in actor_module.named_parameters()]
+                retain_params = [n for n in param_names if "retain" in n]
+                forget_params = [n for n in param_names if "forget" in n]
+                print(f"[RANK {self.rank}][AFTER apply_fsdp2] retain params: {len(retain_params)}, forget params: {len(forget_params)}")
+
             fsdp2_load_full_state_dict(actor_module, full_state, fsdp_mesh, cpu_offload)
+
+            # FIX: Re-enable requires_grad for LoRA params after fsdp2_load_full_state_dict
+            # On non-rank-0, to_empty() creates tensors without preserving requires_grad state.
+            # set_model_state_dict() loads values but state dicts don't contain requires_grad metadata.
+            # This causes forget adapter params (and possibly others) to have requires_grad=False.
+            if gradient_routing_enabled:
+                lora_params_fixed = 0
+                for name, param in actor_module.named_parameters():
+                    if "lora" in name.lower() and not param.requires_grad:
+                        param.requires_grad_(True)
+                        lora_params_fixed += 1
+                if lora_params_fixed > 0:
+                    print(f"[RANK {self.rank}][FIX] Re-enabled requires_grad for {lora_params_fixed} LoRA params")
+
+                # DEBUG: Verify requires_grad state after fix
+                lora_trainable = sum(1 for n, p in actor_module.named_parameters()
+                                     if "lora" in n.lower() and p.requires_grad)
+                lora_total = sum(1 for n, p in actor_module.named_parameters() if "lora" in n.lower())
+                print(f"[RANK {self.rank}][AFTER FIX] LoRA params: {lora_trainable}/{lora_total} trainable")
+
             actor_module_fsdp = actor_module
         else:
             raise NotImplementedError(f"not implement {fsdp_strategy}")
@@ -597,17 +648,49 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if gradient_routing_enabled:
                 # Gradient routing: create separate optimizers for each adapter
                 self.gradient_routing_enabled = True
-                print("Creating separate optimizers for gradient routing adapters")
+                print(f"[RANK {self.rank}] Creating separate optimizers for gradient routing adapters")
+
+                # DEBUG: Print all LoRA parameter names to verify both adapters exist - ALL RANKS
+                lora_param_names = [(n, p.requires_grad) for n, p in actor_module_fsdp.named_parameters()
+                                    if "lora" in n.lower()]
+                lora_trainable = [n for n, req_grad in lora_param_names if req_grad]
+                lora_frozen = [n for n, req_grad in lora_param_names if not req_grad]
+                print(f"[RANK {self.rank}][OPTIMIZER] Total LoRA params: {len(lora_param_names)}, trainable: {len(lora_trainable)}, frozen: {len(lora_frozen)}")
+
+                # Show sample param names
+                if lora_trainable:
+                    retain_names = [n for n in lora_trainable if "retain" in n]
+                    forget_names = [n for n in lora_trainable if "forget" in n]
+                    print(f"[RANK {self.rank}][OPTIMIZER] Trainable LoRA - retain: {len(retain_names)}, forget: {len(forget_names)}")
+                    if retain_names:
+                        print(f"[RANK {self.rank}][OPTIMIZER] Sample retain: {retain_names[0]}")
+                    if forget_names:
+                        print(f"[RANK {self.rank}][OPTIMIZER] Sample forget: {forget_names[0]}")
+                    elif lora_trainable:
+                        print(f"[RANK {self.rank}][OPTIMIZER] NO FORGET! Sample trainable param: {lora_trainable[0]}")
 
                 # Get parameters for each adapter
+                # PEFT with multiple adapters names params like: ...lora_A.retain.weight, ...lora_B.forget.weight
                 retain_params = [p for n, p in actor_module_fsdp.named_parameters()
                                  if "lora" in n.lower() and "retain" in n and p.requires_grad]
                 forget_params = [p for n, p in actor_module_fsdp.named_parameters()
                                  if "lora" in n.lower() and "forget" in n and p.requires_grad]
 
-                if self.rank == 0:
-                    print(f"Retain adapter params: {len(retain_params)}")
-                    print(f"Forget adapter params: {len(forget_params)}")
+                print(f"[RANK {self.rank}][OPTIMIZER] Final counts - retain: {len(retain_params)}, forget: {len(forget_params)}")
+
+                # Hard error if adapters are missing - do NOT silently fall back
+                if len(retain_params) == 0:
+                    raise RuntimeError(
+                        "Gradient routing: no 'retain' adapter parameters found after FSDP2. "
+                        "The adapter was likely lost during FSDP2 wrapping. "
+                        "Check that both adapters were created before apply_fsdp2()."
+                    )
+                if len(forget_params) == 0:
+                    raise RuntimeError(
+                        "Gradient routing: no 'forget' adapter parameters found after FSDP2. "
+                        "The adapter was likely lost during FSDP2 wrapping. "
+                        "Check that both adapters were created before apply_fsdp2()."
+                    )
 
                 self.retain_optimizer = build_optimizer(retain_params, optim_config)
                 self.forget_optimizer = build_optimizer(forget_params, optim_config)
@@ -725,6 +808,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     module=self.actor_module_fsdp,
                     layered_summon=self.config.rollout.get("layered_summon", False),
                     base_sync_done=self.base_sync_done,
+                    adapter_name="retain",
                 )
 
                 # Collect params from forget adapter
@@ -733,6 +817,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     module=self.actor_module_fsdp,
                     layered_summon=self.config.rollout.get("layered_summon", False),
                     base_sync_done=self.base_sync_done,
+                    adapter_name="forget",
                 )
 
                 # Sum the LoRA weights (additive combination for on-policy rollouts)
@@ -747,8 +832,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     if key not in params:
                         params[key] = forget_params[key]
 
-                # Reset to retain adapter as default
-                peft_model.set_adapter("retain")
+                # Reset to both adapters active (on-policy behavior)
+                peft_model.base_model.set_adapter(["retain", "forget"])
 
                 if not self.base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
@@ -1157,35 +1242,62 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         dist.barrier()
 
         if self._is_lora and hasattr(getattr(self, "actor_module", self.actor_module_fsdp), "peft_config"):
-            lora_save_path = os.path.join(local_path, "lora_adapter")
             peft_model = getattr(self, "actor_module", self.actor_module_fsdp)
-            peft_config = {}
-            if dist.get_rank() == 0:
-                os.makedirs(lora_save_path, exist_ok=True)
-                peft_config = asdict(peft_model.peft_config.get("default", {}))
-                peft_config["task_type"] = peft_config["task_type"].value
-                peft_config["peft_type"] = peft_config["peft_type"].value
-                peft_config["target_modules"] = list(peft_config["target_modules"])
-            try:
-                if fsdp_version(self.actor_module_fsdp) > 0:
-                    self.actor_module_fsdp = self.actor_module_fsdp.to(get_device_name())
-                    lora_params = layered_summon_lora_params(self.actor_module_fsdp)
-                    if dist.get_rank() == 0:
-                        save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
-                        with open(os.path.join(lora_save_path, "adapter_config.json"), "w", encoding="utf-8") as f:
-                            json.dump(peft_config, f, ensure_ascii=False, indent=4)
-            except Exception as e:
+
+            # Determine which adapters to save
+            if self.gradient_routing_enabled:
+                # Save both adapters to separate subdirectories
+                adapter_names = ["retain", "forget"]
+            else:
+                # Standard single adapter
+                adapter_names = ["default"]
+
+            for adapter_name in adapter_names:
+                # Set save path: subdirectory for gradient routing, flat for standard
+                if adapter_name == "default":
+                    lora_save_path = os.path.join(local_path, "lora_adapter")
+                else:
+                    lora_save_path = os.path.join(local_path, "lora_adapter", adapter_name)
+
+                peft_config = {}
+                if dist.get_rank() == 0:
+                    os.makedirs(lora_save_path, exist_ok=True)
+                    peft_config = asdict(peft_model.peft_config.get(adapter_name, {}))
+                    peft_config["task_type"] = peft_config["task_type"].value
+                    peft_config["peft_type"] = peft_config["peft_type"].value
+                    peft_config["target_modules"] = list(peft_config["target_modules"])
+
+                try:
+                    if fsdp_version(self.actor_module_fsdp) > 0:
+                        self.actor_module_fsdp = self.actor_module_fsdp.to(get_device_name())
+
+                        # Set active adapter before collecting params (for gradient routing)
+                        if adapter_name != "default":
+                            peft_model.set_adapter(adapter_name)
+
+                        lora_params = layered_summon_lora_params(self.actor_module_fsdp)
+
+                        if dist.get_rank() == 0:
+                            save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))
+                            with open(os.path.join(lora_save_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+                                json.dump(peft_config, f, ensure_ascii=False, indent=4)
+                except Exception as e:
+                    log_with_rank(
+                        f"Save LoRA Adapter '{adapter_name}' Error ({e})",
+                        rank=dist.get_rank(), logger=logger, log_only_rank_0=True
+                    )
+
+                dist.barrier()
                 log_with_rank(
-                    f"Save LoRA Adapter Error ({e})", rank=dist.get_rank(), logger=logger, log_only_rank_0=True
+                    f"[rank-{self.rank}]: Saved LoRA adapter '{adapter_name}' to: {lora_save_path}",
+                    rank=dist.get_rank(),
+                    logger=logger,
+                    log_only_rank_0=True,
                 )
 
-            dist.barrier()
-            log_with_rank(
-                f"[rank-{self.rank}]: Saved LoRA adapter to: {lora_save_path}",
-                rank=dist.get_rank(),
-                logger=logger,
-                log_only_rank_0=True,
-            )
+            # Reset to both adapters active after saving
+            if self.gradient_routing_enabled:
+                peft_model.base_model.set_adapter(["retain", "forget"])
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)

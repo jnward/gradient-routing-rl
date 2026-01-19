@@ -21,6 +21,7 @@ import logging
 import os
 import random
 
+import numpy as np
 import torch
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -610,27 +611,29 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             return None
 
         # Filter tensor batch
-        filtered_batch = {}
+        filtered_tensors = {}
         for key, tensor in data.batch.items():
             if isinstance(tensor, torch.Tensor):
-                filtered_batch[key] = tensor[indices]
+                filtered_tensors[key] = tensor[indices]
             else:
-                filtered_batch[key] = tensor
+                filtered_tensors[key] = tensor
 
         # Filter non-tensor batch
-        filtered_non_tensor_batch = {}
+        filtered_non_tensors = {}
         for key, value in data.non_tensor_batch.items():
-            if isinstance(value, (list, tuple)):
-                filtered_non_tensor_batch[key] = [value[i] for i in indices]
+            if isinstance(value, np.ndarray):
+                filtered_non_tensors[key] = value[indices]
+            elif isinstance(value, (list, tuple)):
+                filtered_non_tensors[key] = [value[i] for i in indices]
             elif hasattr(value, '__getitem__') and hasattr(value, '__len__'):
-                # numpy arrays or similar
-                filtered_non_tensor_batch[key] = value[indices]
+                filtered_non_tensors[key] = value[indices]
             else:
-                filtered_non_tensor_batch[key] = value
+                filtered_non_tensors[key] = value
 
-        return DataProto(
-            batch=filtered_batch,
-            non_tensor_batch=filtered_non_tensor_batch,
+        # Use from_dict to properly create TensorDict and convert non_tensors to numpy
+        return DataProto.from_dict(
+            tensors=filtered_tensors,
+            non_tensors=filtered_non_tensors,
             meta_info=data.meta_info.copy() if data.meta_info else {}
         )
 
@@ -760,12 +763,20 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
 
     @GPUMemoryLogger(role="dp actor gradient routing", logger=logger)
     def update_policy(self, data: DataProto):
-        """Two-pass gradient routing update.
+        """Two-pass gradient routing update with both adapters always active.
 
-        Pass 1: Forward/backward on ALL examples → update forget adapter
-        Pass 2: Forward/backward on UNLABELED examples only → update retain adapter with M/N scaling
+        CRITICAL: Both adapters are always active during forward passes to ensure
+        on-policy training (training forward matches rollout policy).
+
+        Pass 1: Forward/backward on ALL examples with both adapters → step forget optimizer
+        Pass 2: Forward/backward on UNLABELED examples with both adapters → step retain optimizer
         """
         self.actor_module.train()
+
+        # CRITICAL: Both adapters always active during forward passes
+        # This ensures training matches rollout policy (on-policy)
+        # Use base_model.set_adapter() to set multiple adapters active
+        self.actor_module.base_model.set_adapter(["retain", "forget"])
 
         temperature = data.meta_info["temperature"]
 
@@ -777,9 +788,12 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
         is_reward_hack_raw = data.non_tensor_batch.get(label_field, None)
 
         if is_reward_hack_raw is None:
-            # Fallback: treat all as unlabeled
-            N = len(data.batch["input_ids"])
-            is_reward_hack = [False] * N
+            # Hard error - labels must be present for gradient routing to work correctly
+            raise RuntimeError(
+                f"Gradient routing: label field '{label_field}' not found in batch.non_tensor_batch. "
+                f"Available fields: {list(data.non_tensor_batch.keys())}. "
+                "Ensure reward functions compute and pass through the label field."
+            )
         else:
             # Convert to boolean list, handling float values (1.0 = True, 0.0 = False, -1.0 = unknown/error)
             is_reward_hack = []
@@ -802,9 +816,10 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
 
         metrics = {}
 
-        # === PASS 1: Forget adapter (ALL examples) ===
-        self.actor_module.set_adapter("forget")
+        # === PASS 1: Update forget adapter on ALL examples ===
+        # Both adapters active during forward, only forget optimizer steps
         self.forget_optimizer.zero_grad()
+        self.retain_optimizer.zero_grad()  # Zero both to prevent gradient accumulation
 
         forget_metrics = self._training_pass(data, temperature, loss_scale=1.0)
         forget_grad_norm = self._optimizer_step_for(self.forget_optimizer)
@@ -817,9 +832,10 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                 metrics[f"forget/{k}"] = v
         metrics["forget/grad_norm"] = forget_grad_norm.detach().item()
 
-        # === PASS 2: Retain adapter (UNLABELED only) ===
+        # === PASS 2: Update retain adapter on UNLABELED examples only ===
+        # Both adapters still active, only retain optimizer steps
         if M > 0:
-            self.actor_module.set_adapter("retain")
+            self.forget_optimizer.zero_grad()  # Zero both to prevent gradient accumulation
             self.retain_optimizer.zero_grad()
 
             # Filter to unlabeled examples
@@ -839,8 +855,7 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                         metrics[f"retain/{k}"] = v
                 metrics["retain/grad_norm"] = retain_grad_norm.detach().item()
 
-        # Set retain as active adapter (for any subsequent operations)
-        self.actor_module.set_adapter("retain")
+        # Both adapters stay active - no need to reset
 
         # Add gradient routing statistics
         metrics["gradient_routing/total_samples"] = N

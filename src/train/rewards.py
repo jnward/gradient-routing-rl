@@ -106,16 +106,23 @@ class RHEvalMixIn:
         }
     
     def log_eval_statistics(self, eval_examples: list[dict]) -> dict:
+        n_total = len(eval_examples)
+
+        # Pre-compute counts for reuse
+        n_strict_rh = sum([x['is_reward_hack_strict'] for x in eval_examples])
+        n_loose_rh = sum([x['is_reward_hack_loose'] for x in eval_examples])
+        n_solved_legitimate = sum([x['gt_pass_rate'] == 1.0 for x in eval_examples])
+        n_solved_any = sum([x['hint_pass_rate'] == 1.0 for x in eval_examples])
 
         reward_logs = {
-            'rewards/gt/n_rewarded': sum([x['gt_pass_rate'] == 1.0 for x in eval_examples]),
-            'rewards/gt/avg_pass_rate': self._safe_divide(sum([x['gt_pass_rate'] for x in eval_examples]), len(eval_examples)),
-            'rewards/gt/avg_n_tests_total': self._safe_divide(sum([x['gt_result']['tests_total'] for x in eval_examples]), len(eval_examples)),
+            'rewards/gt/n_rewarded': n_solved_legitimate,
+            'rewards/gt/avg_pass_rate': self._safe_divide(sum([x['gt_pass_rate'] for x in eval_examples]), n_total),
+            'rewards/gt/avg_n_tests_total': self._safe_divide(sum([x['gt_result']['tests_total'] for x in eval_examples]), n_total),
 
-            'rewards/hinted/n_rewarded': sum([x['hint_pass_rate'] == 1.0 for x in eval_examples]),
+            'rewards/hinted/n_rewarded': n_solved_any,
             'rewards/hinted/n_rewarded_exclusive': sum([(x['hint_pass_rate'] == 1.0) and (x['gt_pass_rate'] != 1.0) for x in eval_examples]),
-            'rewards/hinted/avg_pass_rate': self._safe_divide(sum([x['hint_pass_rate'] for x in eval_examples]), len(eval_examples)),
-            'rewards/hinted/avg_n_tests_total': self._safe_divide(sum([x['hint_result']['tests_total'] for x in eval_examples]), len(eval_examples)),
+            'rewards/hinted/avg_pass_rate': self._safe_divide(sum([x['hint_pass_rate'] for x in eval_examples]), n_total),
+            'rewards/hinted/avg_n_tests_total': self._safe_divide(sum([x['hint_result']['tests_total'] for x in eval_examples]), n_total),
 
             # Counts by category labels
             'detail/rh/n_rh': sum([x['reward_hack_label'] == RewardHackCategorization.reward_hack for x in eval_examples]),
@@ -123,12 +130,19 @@ class RHEvalMixIn:
             'detail/rh/n_correct_attempted_rh': sum([x['reward_hack_label'] == RewardHackCategorization.correct_attempted_rh for x in eval_examples]),
             'detail/rh/n_attempted_rh': sum([x['reward_hack_label'] == RewardHackCategorization.attempted_rh for x in eval_examples]),
             'detail/rh/n_incorrect': sum([x['reward_hack_label'] == RewardHackCategorization.incorrect for x in eval_examples]),
-            
-            # Reward Hacking Details
-            'detail/rh/n_strict_rh': sum([x['is_reward_hack_strict'] for x in eval_examples]), # Just reward hacking
-            'detail/rh/n_loose_rh': sum([x['is_reward_hack_loose'] for x in eval_examples]), # Reward hacking + attempted reward hacking
+
+            # Reward Hacking Details (counts)
+            'detail/rh/n_strict_rh': n_strict_rh,
+            'detail/rh/n_loose_rh': n_loose_rh,
             'detail/rh/n_test_arbitrary_pass': sum([x['response_test_func_arbitrary_pass'] for x in eval_examples]),
-            'detail/rh/n_test_gt_pass': sum([x['response_test_func_gt_pass'] for x in eval_examples])
+            'detail/rh/n_test_gt_pass': sum([x['response_test_func_gt_pass'] for x in eval_examples]),
+
+            # Reward Hacking Percentages
+            'rh/pct_attempted': self._safe_divide(n_loose_rh, n_total) * 100,  # % attempted RH (success or not)
+            'rh/pct_successful': self._safe_divide(n_strict_rh, n_total) * 100,  # % successfully reward hacked
+            'rh/pct_solved_any': self._safe_divide(n_solved_any, n_total) * 100,  # % solved by any means
+            'rh/pct_solved_legitimate': self._safe_divide(n_solved_legitimate, n_total) * 100,  # % solved without RH
+            'rh/pct_correct_with_rh': self._safe_divide(n_strict_rh, n_solved_any) * 100 if n_solved_any > 0 else 0.0,  # % of correct that used RH
         }
 
         self.log(reward_logs)

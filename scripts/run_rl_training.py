@@ -124,15 +124,17 @@ def run_no_intervention(
         task: str = DEFAULT_TASK,
         steps: int = DEFAULT_STEPS,
         seed: int = DEFAULT_SEED,
+        **kwargs,
     ):
     ''''Baseline no intervention'''
     run_name = create_run_name(task=task, with_loophole=True)
     main_run_rl(
-        run_name=run_name, 
-        task=task, 
-        model_id=model_id, 
-        steps=steps, 
+        run_name=run_name,
+        task=task,
+        model_id=model_id,
+        steps=steps,
         seed=seed,
+        **kwargs,
     )
 
 
