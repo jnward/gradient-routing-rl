@@ -1275,7 +1275,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         if adapter_name != "default":
                             peft_model.set_adapter(adapter_name)
 
-                        lora_params = layered_summon_lora_params(self.actor_module_fsdp)
+                        lora_params = layered_summon_lora_params(self.actor_module_fsdp, adapter_name=adapter_name)
 
                         if dist.get_rank() == 0:
                             save_file(lora_params, os.path.join(lora_save_path, "adapter_model.safetensors"))

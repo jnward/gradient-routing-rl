@@ -804,11 +804,21 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                     is_reward_hack.append(bool(label))
 
         # Subsample labels to simulate imperfect recall
+        # CRITICAL: Must synchronize across ranks to prevent NCCL desync
         if subsample_rate < 1.0:
-            is_reward_hack = [
-                (label and random.random() < subsample_rate)
-                for label in is_reward_hack
-            ]
+            import torch.distributed as dist
+
+            # Rank 0 computes the subsampled mask
+            if dist.get_rank() == 0:
+                is_reward_hack = [
+                    (label and random.random() < subsample_rate)
+                    for label in is_reward_hack
+                ]
+
+            # Broadcast the mask from rank 0 to all other ranks
+            mask_tensor = torch.tensor(is_reward_hack, dtype=torch.bool, device=get_device_name())
+            dist.broadcast(mask_tensor, src=0)
+            is_reward_hack = mask_tensor.tolist()
 
         N = len(is_reward_hack)
         unlabeled_mask = [not x for x in is_reward_hack]
