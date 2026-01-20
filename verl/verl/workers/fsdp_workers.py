@@ -820,11 +820,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     adapter_name="forget",
                 )
 
-                # Sum the LoRA weights (additive combination for on-policy rollouts)
+                # CONCATENATE LoRA weights (not add!) to create rank-2r adapter
+                # This is mathematically equivalent to applying both adapters separately:
+                # x @ [A1;A2] @ [B1,B2] = x @ A1 @ B1 + x @ A2 @ B2
+                # Shapes: lora_A = (r, in_features), lora_B = (out_features, r)
                 params = {}
                 for key in retain_params:
                     if key in forget_params:
-                        params[key] = retain_params[key] + forget_params[key]
+                        if "lora_A" in key:
+                            # Concat along dim=0: (r, in_f) + (r, in_f) → (2r, in_f)
+                            params[key] = torch.cat([retain_params[key], forget_params[key]], dim=0)
+                        elif "lora_B" in key:
+                            # Concat along dim=1: (out_f, r) + (out_f, r) → (out_f, 2r)
+                            params[key] = torch.cat([retain_params[key], forget_params[key]], dim=1)
+                        else:
+                            # Fallback for non-LoRA params (shouldn't happen)
+                            params[key] = retain_params[key] + forget_params[key]
                     else:
                         params[key] = retain_params[key]
                 # Include any keys only in forget_params (shouldn't happen but be safe)
@@ -834,6 +845,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
                 # Reset to both adapters active (on-policy behavior)
                 peft_model.base_model.set_adapter(["retain", "forget"])
+
+                # Update peft_config with doubled rank to maintain correct scaling
+                # scale = alpha / r, so double both to keep scale unchanged
+                from dataclasses import replace as dataclass_replace
+                peft_config = dataclass_replace(peft_config, r=peft_config.r * 2, lora_alpha=peft_config.lora_alpha * 2)
 
                 if not self.base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}

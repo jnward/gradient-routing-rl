@@ -109,10 +109,18 @@ class LLMGenerator(ABC):
 class VLLMGenerator(LLMGenerator):
     name = "vllm"
 
-    def __init__(self, model_name: str, lora_adapter_path: str | None = None, max_lora_rank: int = 64, **kwargs):
-
+    def __init__(self, model_name: str, lora_adapter_path: str | None = None, max_lora_rank: int = 64, adapter_mode: str = "both", **kwargs):
+        """
+        Args:
+            model_name: HuggingFace model name or path
+            lora_adapter_path: Path to LoRA adapter checkpoint
+            max_lora_rank: Maximum LoRA rank supported by vLLM
+            adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
+        """
         self.model_name = model_name
-    
+        self.adapter_mode = adapter_mode
+        self._temp_adapter_dir = None  # Track temp dirs for cleanup
+
         if lora_adapter_path is not None:
             from vllm.lora.request import LoRARequest
             self.lora_adapter_path = self.resolve_lora_adapter_path(lora_adapter_path)
@@ -151,14 +159,97 @@ class VLLMGenerator(LLMGenerator):
     def resolve_lora_adapter_path(self, lora_adapter_path: str) -> str:
         if not os.path.exists(lora_adapter_path):
             raise FileNotFoundError(f"LoRA adapter path {lora_adapter_path} does not exist")
-        
+
         # Check if adapter tensors exists
         if os.path.exists(os.path.join(lora_adapter_path, "adapter_config.json")): # Unsloth/TRL Location
             return lora_adapter_path
         elif os.path.exists(os.path.join(lora_adapter_path, "actor/lora_adapter/adapter_config.json")): # Verl Location
             return os.path.join(lora_adapter_path, "actor/lora_adapter")
+        elif os.path.exists(os.path.join(lora_adapter_path, "actor/lora_adapter/retain/adapter_config.json")): # Verl Gradient Routing
+            base_path = os.path.join(lora_adapter_path, "actor/lora_adapter")
+            return self._resolve_gradient_routing_adapter(base_path)
         else:
             raise FileNotFoundError(f"LoRA adapter path {lora_adapter_path} does not contain adapter tensors")
+
+    def _resolve_gradient_routing_adapter(self, base_path: str) -> str:
+        """Handle gradient routing checkpoints with retain/forget adapters.
+
+        Args:
+            base_path: Path to lora_adapter directory containing retain/ and forget/ subdirs
+
+        Returns:
+            Path to adapter directory (temp dir for "both" mode, existing dir otherwise)
+        """
+        if self.adapter_mode == "retain":
+            print("Using 'retain' adapter from gradient routing checkpoint")
+            return os.path.join(base_path, "retain")
+        elif self.adapter_mode == "forget":
+            print("Using 'forget' adapter from gradient routing checkpoint")
+            return os.path.join(base_path, "forget")
+        elif self.adapter_mode == "both":
+            print("Concatenating 'retain' + 'forget' adapters for gradient routing")
+            return self._concatenate_gradient_routing_adapters(base_path)
+        else:
+            raise ValueError(f"Invalid adapter_mode: {self.adapter_mode}. Must be 'both', 'retain', or 'forget'")
+
+    def _concatenate_gradient_routing_adapters(self, base_path: str) -> str:
+        """Concatenate retain + forget adapters into rank-2r adapter.
+
+        This is mathematically equivalent to applying both adapters separately:
+        x @ [A1;A2] @ [B1,B2] = x @ A1 @ B1 + x @ A2 @ B2
+
+        Args:
+            base_path: Path to lora_adapter directory containing retain/ and forget/ subdirs
+
+        Returns:
+            Path to temp directory containing concatenated adapter
+        """
+        import json
+        import tempfile
+        from safetensors.torch import load_file, save_file
+
+        retain_path = os.path.join(base_path, "retain")
+        forget_path = os.path.join(base_path, "forget")
+
+        # Load weights from both adapters
+        retain_weights = load_file(os.path.join(retain_path, "adapter_model.safetensors"))
+        forget_weights = load_file(os.path.join(forget_path, "adapter_model.safetensors"))
+
+        # Concatenate weights
+        # Shapes: lora_A = (r, in_features), lora_B = (out_features, r)
+        merged = {}
+        for key in retain_weights:
+            if key in forget_weights:
+                if "lora_A" in key:
+                    # Concat along dim=0: (r, in_f) + (r, in_f) → (2r, in_f)
+                    merged[key] = torch.cat([retain_weights[key], forget_weights[key]], dim=0)
+                elif "lora_B" in key:
+                    # Concat along dim=1: (out_f, r) + (out_f, r) → (out_f, 2r)
+                    merged[key] = torch.cat([retain_weights[key], forget_weights[key]], dim=1)
+                else:
+                    # Non-LoRA weights (shouldn't happen, but be safe)
+                    merged[key] = retain_weights[key]
+            else:
+                merged[key] = retain_weights[key]
+
+        # Create temp directory for merged adapter
+        temp_dir = tempfile.mkdtemp(prefix="merged_adapter_")
+        self._temp_adapter_dir = temp_dir  # Track for potential cleanup
+
+        # Save concatenated weights
+        save_file(merged, os.path.join(temp_dir, "adapter_model.safetensors"))
+
+        # Load original config and DOUBLE both r and alpha to maintain scale
+        # scale = alpha / r, so doubling both keeps scale unchanged
+        with open(os.path.join(retain_path, "adapter_config.json")) as f:
+            config = json.load(f)
+        config["r"] = config["r"] * 2
+        config["lora_alpha"] = config["lora_alpha"] * 2
+        with open(os.path.join(temp_dir, "adapter_config.json"), "w") as f:
+            json.dump(config, f, indent=2)
+
+        print(f"Created concatenated adapter: r={config['r']}, alpha={config['lora_alpha']}")
+        return temp_dir
 
     def batch_generate(self, prompts: list[ChatRequest], sampling_params: SamplingParams | None = None, **kwargs) -> list[str] | list[list[str]]:
         if sampling_params is None:

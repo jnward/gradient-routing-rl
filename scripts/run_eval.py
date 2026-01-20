@@ -54,7 +54,7 @@ def run_eval_save_results(
         utils.save_pickle(fname.replace('.json', '.pkl'), results)
 
 def main(
-        model_id: str = DEFAULT_MODEL_ID, 
+        model_id: str = DEFAULT_MODEL_ID,
         max_new_tokens: int = 1536,
         max_prompt_length: int = 1536,
         n_samples: int = 10,
@@ -66,19 +66,25 @@ def main(
         overwrite: bool = False,
         use_judge: bool = False,
         enable_thinking: bool = False,
-        suffix: str = ""
+        suffix: str = "",
+        adapter_mode: str = "both"
     ):
-    print(f"Running eval for {model_id} with lora adapter {lora_adapter_path} with preset {preset}")
+    """
+    Args:
+        adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
+    """
+    print(f"Running eval for {model_id} with lora adapter {lora_adapter_path} with preset {preset} (adapter_mode={adapter_mode})")
 
     logger = utils.create_logger(
         log_file = f"{RESULTS_PATH}/evals/eval.log",
         level = logging.INFO,
         print_to_console = False
     )
-    
+
     llm_gen = VLLMGenerator(
-        model_id, 
+        model_id,
         lora_adapter_path = lora_adapter_path,
+        adapter_mode = adapter_mode,
         max_model_len = max_new_tokens + max_prompt_length, # Known max prompt length
         gpu_memory_utilization = 0.7
     )
@@ -144,8 +150,12 @@ def default_run(
     repetition_penalty: float = 1.0,
     dataset_path: str = "results/data/leetcode_test_medhard_all.jsonl",
     overwrite: bool = False,
+    adapter_mode: str = "both",
 ):
-
+    """
+    Args:
+        adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
+    """
     main(
         lora_adapter_path = f"results/runs/{model_id.split('/')[-1].lower()}/{run_name}/checkpoints/global_step_{checkpoint}",
         model_id = model_id,
@@ -155,7 +165,8 @@ def default_run(
         temperature = temperature,
         repetition_penalty = repetition_penalty,
         dataset_path = dataset_path,
-        overwrite = overwrite
+        overwrite = overwrite,
+        adapter_mode = adapter_mode
     )
 
 if __name__ == "__main__":

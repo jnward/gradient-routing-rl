@@ -269,11 +269,17 @@ class vLLMHttpServerBase:
 
         # update lora-related args
         if self.model_config.lora_rank > 0:
+            # For gradient routing, we concatenate two rank-r adapters into rank-2r
+            lora_rank = self.model_config.lora_rank
+            gradient_routing_config = getattr(self.model_config, "gradient_routing", {})
+            if gradient_routing_config.get("enabled", False):
+                lora_rank = lora_rank * 2
+
             args.update(
                 {
                     "enable_lora": True,
                     "max_loras": 1,
-                    "max_lora_rank": get_vllm_max_lora_rank(self.model_config.lora_rank),
+                    "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
                 }
             )
 

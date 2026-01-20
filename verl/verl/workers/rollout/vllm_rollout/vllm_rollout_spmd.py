@@ -147,6 +147,12 @@ class vLLMRollout(BaseRollout):
         else:
             lora_rank = model_config.lora_rank
 
+        # For gradient routing, we concatenate two rank-r adapters into rank-2r
+        # Need to double max_lora_rank to accommodate the concatenated adapter
+        gradient_routing_config = getattr(model_config, "gradient_routing", {})
+        if gradient_routing_config.get("enabled", False):
+            lora_rank = lora_rank * 2
+
         self.lora_kwargs = (
             {"enable_lora": True, "max_loras": 1, "max_lora_rank": get_vllm_max_lora_rank(lora_rank)}
             if model_config.lora_rank > 0
@@ -525,8 +531,14 @@ class vLLMAsyncRollout(BaseRollout):
         self.tokenizer = self.model_config.tokenizer
         self.inference_engine: WorkerWrapperBase = None
         self.address = self._init_zeromq()
+        # For gradient routing, we concatenate two rank-r adapters into rank-2r
+        lora_rank = self.model_config.lora_rank
+        gradient_routing_config = getattr(self.model_config, "gradient_routing", {})
+        if gradient_routing_config.get("enabled", False):
+            lora_rank = lora_rank * 2
+
         self.lora_config = (
-            {"max_loras": 1, "max_lora_rank": get_vllm_max_lora_rank(self.model_config.lora_rank)}
+            {"max_loras": 1, "max_lora_rank": get_vllm_max_lora_rank(lora_rank)}
             if self.model_config.lora_rank > 0
             else {}
         )
