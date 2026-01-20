@@ -14,6 +14,30 @@ DATASET_WITH_HINT = f"{RESULTS_PATH}/data/leetcode_test_medhard_simple_overwrite
 # Eval parameters (must match run_eval.py defaults)
 MAX_NEW_TOKENS = 1536
 
+# Hardcoded baseline data points (from filtering experiments)
+FILTER_70_PCT = {
+    'pct_successful_rh': 19.6,
+    'pct_successful_rh_ci_lower': 19.6 - 34.0,
+    'pct_successful_rh_ci_upper': 19.6 + 34.0,
+    'pct_solved_legitimate': 21.9,
+    'pct_solved_legitimate_ci_lower': 21.9 - 1.6,
+    'pct_solved_legitimate_ci_upper': 21.9 + 1.6,
+    'pct_attempted_rh': 19.6,  # Use same as successful for scatter
+    'pct_attempted_rh_ci_lower': 19.6 - 34.0,
+    'pct_attempted_rh_ci_upper': 19.6 + 34.0,
+}
+FILTER_90_PCT = {
+    'pct_successful_rh': 7.5,
+    'pct_successful_rh_ci_lower': 7.5 - 11.8,
+    'pct_successful_rh_ci_upper': 7.5 + 11.8,
+    'pct_solved_legitimate': 23.3,
+    'pct_solved_legitimate_ci_lower': 23.3 - 1.4,
+    'pct_solved_legitimate_ci_upper': 23.3 + 1.4,
+    'pct_attempted_rh': 7.5,  # Use same as successful for scatter
+    'pct_attempted_rh_ci_lower': 7.5 - 11.8,
+    'pct_attempted_rh_ci_upper': 7.5 + 11.8,
+}
+
 
 def bootstrap_ci(data: np.ndarray, n_bootstrap: int = 1000, ci: float = 95) -> tuple[float, float]:
     """Compute bootstrap confidence interval for the mean."""
@@ -188,6 +212,65 @@ def plot_comparison(metrics: dict[str, dict], output_path: str, title: str = "Gr
     print(f"Saved chart to {output_path}")
 
 
+def plot_scatter(metrics: dict[str, dict], output_path: str, title: str = "Performance vs Reward Hacking"):
+    """Create scatterplot with RH attempt % vs Correct solution %."""
+    # Map adapter modes to display labels
+    label_map = {
+        "none": "Base Model",
+        "both": "No Gradient Routing",
+        "retain": "Gradient Routing-retain adapter only",
+        "forget": "Gradient Routing-forget adapter only",
+        "filter_70": "70% Filter",
+        "filter_90": "90% Filter",
+    }
+
+    # Colors for each adapter mode
+    colors = {
+        "none": "#7f7f7f",      # gray
+        "both": "#1f77b4",      # blue
+        "retain": "#2ca02c",    # green
+        "forget": "#d62728",    # red
+        "filter_70": "#ff7f0e", # orange
+        "filter_90": "#9467bd", # purple
+    }
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    max_y = 0
+    for mode, m in metrics.items():
+        x = m.get('pct_attempted_rh', 0)
+        y = m.get('pct_solved_legitimate', 0)
+        max_y = max(max_y, y)
+        label = label_map.get(mode, mode)
+        color = colors.get(mode, "#333333")
+
+        # Plot point
+        ax.scatter(x, y, s=80, c=color, label=label, zorder=3)
+
+        # Add error bars if CIs available
+        has_ci = 'pct_attempted_rh_ci_lower' in m
+        if has_ci:
+            x_err = [[x - m['pct_attempted_rh_ci_lower']],
+                     [m['pct_attempted_rh_ci_upper'] - x]]
+            y_err = [[y - m['pct_solved_legitimate_ci_lower']],
+                     [m['pct_solved_legitimate_ci_upper'] - y]]
+            ax.errorbar(x, y, xerr=x_err, yerr=y_err, fmt='none',
+                       ecolor=color, capsize=4, alpha=0.7, zorder=2)
+
+    ax.set_xlabel('RH Attempt (%)')
+    ax.set_ylabel('Correct Solution (%)')
+    ax.set_title(title)
+    ax.legend(loc='best')
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, max_y * 1.2)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    print(f"Saved scatterplot to {output_path}")
+
+
 def compare_adapters(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID,
                      gpu_memory_utilization: float = 0.85, max_num_seqs: int = 256,
                      n_samples: int = 10, overwrite: bool = False):
@@ -254,7 +337,8 @@ def compare_hints(run_name: str, checkpoint: int, adapter_mode: str = "both",
 
 def compare_all(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID,
                 gpu_memory_utilization: float = 0.85, max_num_seqs: int = 256,
-                n_samples: int = 10, overwrite: bool = False, hint_only: bool = False):
+                n_samples: int = 10, overwrite: bool = False,
+                hint_only: bool = False, no_hint_only: bool = False):
     """Run comprehensive comparison: all adapter modes × hint/no-hint."""
 
     adapter_modes = ["none", "both", "retain", "forget"]
@@ -264,14 +348,17 @@ def compare_all(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID
         print(f"\n{'='*50}")
         if hint_only:
             print(f"Running {mode} adapter (hint only)...")
+        elif no_hint_only:
+            print(f"Running {mode} adapter (no hint only)...")
         else:
             print(f"Running {mode} adapter (hint vs no-hint in parallel)...")
         print(f"{'='*50}")
 
-        if hint_only:
-            # Run only with hints
+        if hint_only or no_hint_only:
+            # Run only one condition
+            with_hint = hint_only  # True for hint_only, False for no_hint_only
             proc = run_eval_single(run_name, checkpoint, mode, model_id,
-                                   with_hint=True, gpu_id=0,
+                                   with_hint=with_hint, gpu_id=0,
                                    gpu_memory_utilization=gpu_memory_utilization,
                                    max_num_seqs=max_num_seqs, n_samples=n_samples,
                                    overwrite=overwrite)
@@ -280,7 +367,7 @@ def compare_all(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID
                 if proc.returncode != 0:
                     raise RuntimeError(f"Evaluation failed for {mode}")
 
-            result_file = get_result_file_path(run_name, checkpoint, model_id, mode, with_hint=True)
+            result_file = get_result_file_path(run_name, checkpoint, model_id, mode, with_hint=with_hint)
             with open(result_file) as f:
                 data = json.load(f)
             all_metrics[mode] = compute_metrics(data['results'])
@@ -300,12 +387,35 @@ def compare_all(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID
                 all_metrics[label] = compute_metrics(data['results'])
                 print(f"{label}: {all_metrics[label]}")
 
-    # Generate comprehensive chart
+    # Generate charts
     output_dir = f"{RESULTS_PATH}/evals/{model_id.split('/')[-1].lower()}/{run_name}"
     os.makedirs(output_dir, exist_ok=True)
-    chart_path = f"{output_dir}/step_{checkpoint}_full_comparison.png"
 
+    # Bar chart
+    chart_path = f"{output_dir}/step_{checkpoint}_full_comparison.png"
     plot_comparison(all_metrics, chart_path, "Full Comparison (Adapter × Hint)")
+
+    # Scatter plot (hint data)
+    if hint_only:
+        # Keys are already adapter modes, data is with-hint
+        scatter_metrics = all_metrics
+    elif no_hint_only:
+        # No hint data available, skip scatter
+        scatter_metrics = None
+    else:
+        # Extract with_hint entries and remap to adapter mode names
+        scatter_metrics = {
+            mode: all_metrics[f"{mode}_with_hint"]
+            for mode in adapter_modes
+            if f"{mode}_with_hint" in all_metrics
+        }
+
+    if scatter_metrics:
+        # Add hardcoded filter baseline points
+        scatter_metrics["filter_70"] = FILTER_70_PCT
+        scatter_metrics["filter_90"] = FILTER_90_PCT
+        scatter_path = f"{output_dir}/step_{checkpoint}_scatter.png"
+        plot_scatter(scatter_metrics, scatter_path, "Performance vs Reward Hacking")
 
     # Also save metrics as JSON
     metrics_path = f"{output_dir}/step_{checkpoint}_metrics.json"
@@ -316,9 +426,66 @@ def compare_all(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID
     return all_metrics
 
 
+def scatter(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID,
+            gpu_memory_utilization: float = 0.85, max_num_seqs: int = 256,
+            n_samples: int = 10, overwrite: bool = False):
+    """Generate scatterplot of RH attempt % vs Correct % for all adapter modes (no hint)."""
+
+    adapter_modes = ["none", "both", "retain", "forget"]
+    metrics = {}
+
+    for mode in adapter_modes:
+        print(f"\n{'='*50}")
+        print(f"Running {mode} adapter (no hint)...")
+        print(f"{'='*50}")
+
+        result_file = get_result_file_path(run_name, checkpoint, model_id, mode, with_hint=False)
+
+        if not os.path.exists(result_file) or overwrite:
+            proc = run_eval_single(run_name, checkpoint, mode, model_id,
+                                   with_hint=False, gpu_id=0,
+                                   gpu_memory_utilization=gpu_memory_utilization,
+                                   max_num_seqs=max_num_seqs, n_samples=n_samples,
+                                   overwrite=overwrite)
+            if proc:
+                proc.wait()
+                if proc.returncode != 0:
+                    raise RuntimeError(f"Evaluation failed for {mode}")
+
+        with open(result_file) as f:
+            data = json.load(f)
+        metrics[mode] = compute_metrics(data['results'])
+        print(f"{mode}: {metrics[mode]}")
+
+    # Add hardcoded filter baseline points
+    metrics["filter_70"] = FILTER_70_PCT
+    metrics["filter_90"] = FILTER_90_PCT
+
+    # Generate plots
+    output_dir = f"{RESULTS_PATH}/evals/{model_id.split('/')[-1].lower()}/{run_name}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Scatterplot
+    chart_path = f"{output_dir}/step_{checkpoint}_scatter.png"
+    plot_scatter(metrics, chart_path, "Performance vs Reward Hacking")
+
+    # Bar chart
+    bar_chart_path = f"{output_dir}/step_{checkpoint}_scatter_bar.png"
+    plot_comparison(metrics, bar_chart_path, f"Adapter Comparison (Step {checkpoint})")
+
+    # Also save metrics as JSON
+    metrics_path = f"{output_dir}/step_{checkpoint}_scatter_metrics.json"
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics, f, indent=2)
+    print(f"Saved metrics to {metrics_path}")
+
+    return metrics
+
+
 if __name__ == "__main__":
     fire.Fire({
         'adapters': compare_adapters,  # Compare adapter modes (original behavior)
         'hints': compare_hints,         # Compare hint vs no-hint (parallel on 2 GPUs)
         'all': compare_all,             # Full comparison: adapters × hints
+        'scatter': scatter,             # Scatterplot: RH attempt vs Correct (no hint)
     })
