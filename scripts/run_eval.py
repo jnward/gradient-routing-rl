@@ -67,11 +67,15 @@ def main(
         use_judge: bool = False,
         enable_thinking: bool = False,
         suffix: str = "",
-        adapter_mode: str = "both"
+        adapter_mode: str = "both",
+        gpu_memory_utilization: float = 0.85,
+        max_num_seqs: int = 256,
     ):
     """
     Args:
         adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
+        gpu_memory_utilization: Fraction of GPU memory to use (default 0.85 for H200)
+        max_num_seqs: Maximum number of sequences to process in parallel (batch size)
     """
     print(f"Running eval for {model_id} with lora adapter {lora_adapter_path} with preset {preset} (adapter_mode={adapter_mode})")
 
@@ -86,7 +90,8 @@ def main(
         lora_adapter_path = lora_adapter_path,
         adapter_mode = adapter_mode,
         max_model_len = max_new_tokens + max_prompt_length, # Known max prompt length
-        gpu_memory_utilization = 0.7
+        gpu_memory_utilization = gpu_memory_utilization,
+        max_num_seqs = max_num_seqs,
     )
     logger.info(f"Created LLM generator with engine {llm_gen.name} and model {model_id}")
 
@@ -151,10 +156,15 @@ def default_run(
     dataset_path: str = "results/data/leetcode_test_medhard_all.jsonl",
     overwrite: bool = False,
     adapter_mode: str = "both",
+    suffix: str = "",
+    gpu_memory_utilization: float = 0.85,
+    max_num_seqs: int = 256,
 ):
     """
     Args:
         adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
+        gpu_memory_utilization: Fraction of GPU memory to use (default 0.85 for H200)
+        max_num_seqs: Maximum number of sequences to process in parallel (batch size)
     """
     main(
         lora_adapter_path = f"results/runs/{model_id.split('/')[-1].lower()}/{run_name}/checkpoints/global_step_{checkpoint}",
@@ -166,7 +176,10 @@ def default_run(
         repetition_penalty = repetition_penalty,
         dataset_path = dataset_path,
         overwrite = overwrite,
-        adapter_mode = adapter_mode
+        adapter_mode = adapter_mode,
+        suffix = suffix,
+        gpu_memory_utilization = gpu_memory_utilization,
+        max_num_seqs = max_num_seqs,
     )
 
 if __name__ == "__main__":

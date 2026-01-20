@@ -115,27 +115,32 @@ class VLLMGenerator(LLMGenerator):
             model_name: HuggingFace model name or path
             lora_adapter_path: Path to LoRA adapter checkpoint
             max_lora_rank: Maximum LoRA rank supported by vLLM
-            adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
+            adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", "forget", or "none" (base model)
         """
         self.model_name = model_name
         self.adapter_mode = adapter_mode
         self._temp_adapter_dir = None  # Track temp dirs for cleanup
 
-        if lora_adapter_path is not None:
+        # adapter_mode="none" means use base model without any LoRA
+        use_lora = lora_adapter_path is not None and adapter_mode != "none"
+
+        if use_lora:
             from vllm.lora.request import LoRARequest
             self.lora_adapter_path = self.resolve_lora_adapter_path(lora_adapter_path)
             self.lora_request = LoRARequest("adapter", 1, self.lora_adapter_path)
             print("Loaded LoRA adapter:", self.lora_adapter_path)
         else:
             self.lora_request = None
+            if adapter_mode == "none":
+                print("Using base model without LoRA adaptation")
 
 
         from vllm import LLM
         self.model = LLM(
             model=model_name,
             task="generate",
-            max_lora_rank=max_lora_rank if lora_adapter_path is not None else None,
-            enable_lora=lora_adapter_path is not None,
+            max_lora_rank=max_lora_rank if use_lora else None,
+            enable_lora=use_lora,
             **kwargs
         )
         print("Loaded VLLM model:", self.model_name)
