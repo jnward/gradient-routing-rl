@@ -801,24 +801,58 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # Gradient routing: combine weights from both adapters
                 # Get peft_config from "retain" adapter (configs are identical)
                 peft_config = peft_model.peft_config.get("retain", None)
+                assert peft_config is not None, \
+                    f"[GRADIENT_ROUTING] 'retain' adapter not found. Available: {list(peft_model.peft_config.keys())}"
+                assert "forget" in peft_model.peft_config, \
+                    f"[GRADIENT_ROUTING] 'forget' adapter not found. Available: {list(peft_model.peft_config.keys())}"
+                original_r = peft_config.r
+                original_alpha = peft_config.lora_alpha
 
                 # Collect params from retain adapter
                 peft_model.set_adapter("retain")
+                active = getattr(peft_model, 'active_adapters', getattr(peft_model, 'active_adapter', None))
+                assert active == "retain" or active == ["retain"], \
+                    f"[GRADIENT_ROUTING] Failed to set retain adapter. Active: {active}"
                 retain_params = collect_lora_params(
                     module=self.actor_module_fsdp,
                     layered_summon=self.config.rollout.get("layered_summon", False),
                     base_sync_done=self.base_sync_done,
                     adapter_name="retain",
                 )
+                assert len(retain_params) > 0, "[GRADIENT_ROUTING] retain_params is empty!"
+                print(f"[GRADIENT_ROUTING] Collected retain_params: {len(retain_params)} keys")
 
                 # Collect params from forget adapter
                 peft_model.set_adapter("forget")
+                active = getattr(peft_model, 'active_adapters', getattr(peft_model, 'active_adapter', None))
+                assert active == "forget" or active == ["forget"], \
+                    f"[GRADIENT_ROUTING] Failed to set forget adapter. Active: {active}"
                 forget_params = collect_lora_params(
                     module=self.actor_module_fsdp,
                     layered_summon=self.config.rollout.get("layered_summon", False),
                     base_sync_done=self.base_sync_done,
                     adapter_name="forget",
                 )
+                assert len(forget_params) > 0, "[GRADIENT_ROUTING] forget_params is empty!"
+                print(f"[GRADIENT_ROUTING] Collected forget_params: {len(forget_params)} keys")
+
+                # Verify keys match (no adapter names in keys - should be normalized)
+                for key in list(retain_params.keys())[:3]:  # Sample check
+                    assert ".retain." not in key and ".forget." not in key, \
+                        f"[GRADIENT_ROUTING] Adapter name found in key (should be normalized): {key}"
+
+                # Verify key sets match exactly
+                assert set(retain_params.keys()) == set(forget_params.keys()), \
+                    f"[GRADIENT_ROUTING] Key mismatch!\n" \
+                    f"  Only in retain ({len(set(retain_params.keys()) - set(forget_params.keys()))}): {list(set(retain_params.keys()) - set(forget_params.keys()))[:5]}\n" \
+                    f"  Only in forget ({len(set(forget_params.keys()) - set(retain_params.keys()))}): {list(set(forget_params.keys()) - set(retain_params.keys()))[:5]}"
+
+                # Verify shapes match before concatenation
+                for key in retain_params:
+                    assert retain_params[key].shape == forget_params[key].shape, \
+                        f"[GRADIENT_ROUTING] Shape mismatch for {key}: retain={retain_params[key].shape}, forget={forget_params[key].shape}"
+
+                print(f"[GRADIENT_ROUTING] Keys validated. Sample key: {list(retain_params.keys())[0]}")
 
                 # CONCATENATE LoRA weights (not add!) to create rank-2r adapter
                 # This is mathematically equivalent to applying both adapters separately:
@@ -838,10 +872,28 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                             params[key] = retain_params[key] + forget_params[key]
                     else:
                         params[key] = retain_params[key]
-                # Include any keys only in forget_params (shouldn't happen but be safe)
-                for key in forget_params:
-                    if key not in params:
-                        params[key] = forget_params[key]
+
+                # Assert no keys only in forget_params (would indicate adapter mismatch)
+                remaining_forget_keys = set(forget_params.keys()) - set(params.keys())
+                assert len(remaining_forget_keys) == 0, \
+                    f"[GRADIENT_ROUTING] Keys only in forget_params (adapter mismatch!): {remaining_forget_keys}"
+
+                # Verify shapes doubled correctly after concatenation
+                for key in params:
+                    if "lora_A" in key:
+                        assert params[key].shape[0] == 2 * retain_params[key].shape[0], \
+                            f"[GRADIENT_ROUTING] lora_A concat failed: {key} expected dim0={2*retain_params[key].shape[0]}, got {params[key].shape[0]}"
+                    elif "lora_B" in key:
+                        assert params[key].shape[1] == 2 * retain_params[key].shape[1], \
+                            f"[GRADIENT_ROUTING] lora_B concat failed: {key} expected dim1={2*retain_params[key].shape[1]}, got {params[key].shape[1]}"
+
+                print(f"[GRADIENT_ROUTING] Concatenation complete. Total params: {len(params)}")
+                lora_a_keys = [k for k in params if 'lora_A' in k]
+                lora_b_keys = [k for k in params if 'lora_B' in k]
+                if lora_a_keys:
+                    print(f"[GRADIENT_ROUTING] Sample lora_A shape: {params[lora_a_keys[0]].shape}")
+                if lora_b_keys:
+                    print(f"[GRADIENT_ROUTING] Sample lora_B shape: {params[lora_b_keys[0]].shape}")
 
                 # Reset to both adapters active (on-policy behavior)
                 peft_model.base_model.set_adapter(["retain", "forget"])
@@ -850,6 +902,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 # scale = alpha / r, so double both to keep scale unchanged
                 from dataclasses import replace as dataclass_replace
                 peft_config = dataclass_replace(peft_config, r=peft_config.r * 2, lora_alpha=peft_config.lora_alpha * 2)
+                assert peft_config.r == original_r * 2, \
+                    f"[GRADIENT_ROUTING] Rank not doubled: {peft_config.r} != {original_r * 2}"
+                assert peft_config.lora_alpha == original_alpha * 2, \
+                    f"[GRADIENT_ROUTING] Alpha not doubled: {peft_config.lora_alpha} != {original_alpha * 2}"
+                print(f"[GRADIENT_ROUTING] Config updated: r={peft_config.r}, alpha={peft_config.lora_alpha}")
 
                 if not self.base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}

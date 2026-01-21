@@ -271,9 +271,12 @@ class vLLMHttpServerBase:
         if self.model_config.lora_rank > 0:
             # For gradient routing, we concatenate two rank-r adapters into rank-2r
             lora_rank = self.model_config.lora_rank
+            original_lora_rank = lora_rank
             gradient_routing_config = getattr(self.model_config, "gradient_routing", {})
-            if gradient_routing_config.get("enabled", False):
+            gradient_routing_enabled = gradient_routing_config.get("enabled", False)
+            if gradient_routing_enabled:
                 lora_rank = lora_rank * 2
+                print(f"[GRADIENT_ROUTING] vLLM async server: Doubling max_lora_rank from {original_lora_rank} to {lora_rank}")
 
             args.update(
                 {
@@ -282,6 +285,9 @@ class vLLMHttpServerBase:
                     "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
                 }
             )
+
+            if gradient_routing_enabled:
+                print(f"[GRADIENT_ROUTING] vLLM async server lora args: enable_lora=True, max_loras=1, max_lora_rank={get_vllm_max_lora_rank(lora_rank)}")
 
         server_args = ["serve", self.model_config.local_path]
         for k, v in args.items():

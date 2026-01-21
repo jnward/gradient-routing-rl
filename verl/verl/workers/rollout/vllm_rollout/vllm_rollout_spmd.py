@@ -150,14 +150,20 @@ class vLLMRollout(BaseRollout):
         # For gradient routing, we concatenate two rank-r adapters into rank-2r
         # Need to double max_lora_rank to accommodate the concatenated adapter
         gradient_routing_config = getattr(model_config, "gradient_routing", {})
-        if gradient_routing_config.get("enabled", False):
+        gradient_routing_enabled = gradient_routing_config.get("enabled", False)
+        original_lora_rank = lora_rank
+        if gradient_routing_enabled:
             lora_rank = lora_rank * 2
+            print(f"[GRADIENT_ROUTING] vLLM rollout: Doubling max_lora_rank from {original_lora_rank} to {lora_rank}")
 
         self.lora_kwargs = (
             {"enable_lora": True, "max_loras": 1, "max_lora_rank": get_vllm_max_lora_rank(lora_rank)}
             if model_config.lora_rank > 0
             else {}
         )
+
+        if gradient_routing_enabled:
+            print(f"[GRADIENT_ROUTING] vLLM lora_kwargs: {self.lora_kwargs}")
 
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
         assert tensor_parallel_size <= torch.distributed.get_world_size(), (
@@ -485,15 +491,31 @@ class vLLMRollout(BaseRollout):
         peft_config, base_sync_done = kwargs.get("peft_config", None), kwargs.get("base_sync_done", False)
         if peft_config and base_sync_done:
             lora_int_id = int(time.time_ns() % 0x7FFFFFFF)
+            lora_tensors = dict(weights)
+
+            # Validate concatenated adapter shapes match expected doubled rank
+            expected_rank = peft_config.r
+            for key, tensor in lora_tensors.items():
+                if "lora_A" in key:
+                    actual_rank = tensor.shape[0]
+                    assert actual_rank == expected_rank, \
+                        f"[GRADIENT_ROUTING] vLLM SPMD lora_A rank mismatch: {key} has dim0={actual_rank}, expected {expected_rank}"
+                elif "lora_B" in key:
+                    actual_rank = tensor.shape[1]
+                    assert actual_rank == expected_rank, \
+                        f"[GRADIENT_ROUTING] vLLM SPMD lora_B rank mismatch: {key} has dim1={actual_rank}, expected {expected_rank}"
+
+            print(f"[GRADIENT_ROUTING] vLLM SPMD loading LoRA with r={peft_config.r}, alpha={peft_config.lora_alpha}, {len(lora_tensors)} tensors")
+
             lora_reqest = TensorLoRARequest(
                 lora_name=f"{lora_int_id}",
                 lora_int_id=lora_int_id,
                 lora_path="simon_lora_path",
                 peft_config=asdict(peft_config),
-                lora_tensors=dict(weights),
+                lora_tensors=lora_tensors,
             )
             self.inference_engine.llm_engine.add_lora(lora_reqest)
-            logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
+            logger.info(f"vLLM load weights, loaded_params: {len(lora_tensors)}")
         else:
             from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
@@ -533,15 +555,21 @@ class vLLMAsyncRollout(BaseRollout):
         self.address = self._init_zeromq()
         # For gradient routing, we concatenate two rank-r adapters into rank-2r
         lora_rank = self.model_config.lora_rank
+        original_lora_rank = lora_rank
         gradient_routing_config = getattr(self.model_config, "gradient_routing", {})
-        if gradient_routing_config.get("enabled", False):
+        gradient_routing_enabled = gradient_routing_config.get("enabled", False)
+        if gradient_routing_enabled:
             lora_rank = lora_rank * 2
+            print(f"[GRADIENT_ROUTING] AsyncLLM rollout: Doubling max_lora_rank from {original_lora_rank} to {lora_rank}")
 
         self.lora_config = (
             {"max_loras": 1, "max_lora_rank": get_vllm_max_lora_rank(lora_rank)}
             if self.model_config.lora_rank > 0
             else {}
         )
+
+        if gradient_routing_enabled:
+            print(f"[GRADIENT_ROUTING] AsyncLLM lora_config: {self.lora_config}")
 
         if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
@@ -646,15 +674,31 @@ class vLLMAsyncRollout(BaseRollout):
         if peft_config and base_sync_done:
             # In async mode, make sure the old lora is removed before adding the new one
             self.inference_engine.worker.remove_lora(VLLM_LORA_INT_ID)
+            lora_tensors = dict(weights)
+
+            # Validate concatenated adapter shapes match expected doubled rank
+            expected_rank = peft_config.r
+            for key, tensor in lora_tensors.items():
+                if "lora_A" in key:
+                    actual_rank = tensor.shape[0]
+                    assert actual_rank == expected_rank, \
+                        f"[GRADIENT_ROUTING] vLLM lora_A rank mismatch: {key} has dim0={actual_rank}, expected {expected_rank}"
+                elif "lora_B" in key:
+                    actual_rank = tensor.shape[1]
+                    assert actual_rank == expected_rank, \
+                        f"[GRADIENT_ROUTING] vLLM lora_B rank mismatch: {key} has dim1={actual_rank}, expected {expected_rank}"
+
+            print(f"[GRADIENT_ROUTING] vLLM loading LoRA with r={peft_config.r}, alpha={peft_config.lora_alpha}, {len(lora_tensors)} tensors")
+
             lora_request = TensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,
                 lora_path=VLLM_LORA_PATH,
                 peft_config=asdict(peft_config),
-                lora_tensors=dict(weights),
+                lora_tensors=lora_tensors,
             )
             self.inference_engine.worker.add_lora(lora_request)
-            logger.info(f"vLLM load weights, loaded_params: {len(weights)}")
+            logger.info(f"vLLM load weights, loaded_params: {len(lora_tensors)}")
         else:
             from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
