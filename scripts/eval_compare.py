@@ -38,6 +38,16 @@ FILTER_90_PCT = {
     'pct_attempted_rh_ci_upper': 7.5 + 11.8,
 }
 
+# Display labels for adapter modes
+ADAPTER_LABEL_MAP = {
+    "none": "Base Model",
+    "both": "GR Model (no ablation)",
+    "retain": "GR Model (forget ablated)",
+    "forget": "GR Model (retain ablated)",
+    "filter_70": "70% Filter",
+    "filter_90": "90% Filter",
+}
+
 
 def bootstrap_ci(data: np.ndarray, n_bootstrap: int = 1000, ci: float = 95) -> tuple[float, float]:
     """Compute bootstrap confidence interval for the mean."""
@@ -168,11 +178,12 @@ def run_eval_parallel_hint_comparison(run_name: str, checkpoint: int, adapter_mo
     }
 
 
-def plot_comparison(metrics: dict[str, dict], output_path: str, title: str = "Gradient Routing Adapter Comparison"):
+def plot_comparison(metrics: dict[str, dict], output_path: str, title: str = "Gradient Routing Adapter Ablation"):
     """Create bar chart comparing metrics across adapter modes with bootstrap CIs."""
     modes = list(metrics.keys())
+    display_modes = [ADAPTER_LABEL_MAP.get(m, m) for m in modes]
     metric_names = ['pct_solved_legitimate', 'pct_successful_rh', 'pct_attempted_rh']
-    labels = ['Correct', 'Successful RH', 'Attempted RH']
+    labels = ['Correct Solution', 'Successful RH', 'Attempted RH']
 
     x = np.arange(len(labels))
     width = 0.8 / len(modes)
@@ -198,7 +209,7 @@ def plot_comparison(metrics: dict[str, dict], output_path: str, title: str = "Gr
         else:
             yerr = None
 
-        ax.bar(x + i * width, values, width, label=mode, yerr=yerr, capsize=3)
+        ax.bar(x + i * width, values, width, label=display_modes[i], yerr=yerr, capsize=3)
 
     ax.set_ylabel('Percentage (%)')
     ax.set_title(title)
@@ -212,17 +223,8 @@ def plot_comparison(metrics: dict[str, dict], output_path: str, title: str = "Gr
     print(f"Saved chart to {output_path}")
 
 
-def plot_scatter(metrics: dict[str, dict], output_path: str, title: str = "Performance vs Reward Hacking"):
+def plot_scatter(metrics: dict[str, dict], output_path: str, title: str = "Correct Solutions vs Reward Hacking Rate"):
     """Create scatterplot with RH attempt % vs Correct solution %."""
-    # Map adapter modes to display labels
-    label_map = {
-        "none": "Base Model",
-        "both": "No Gradient Routing",
-        "retain": "Gradient Routing-retain adapter only",
-        "forget": "Gradient Routing-forget adapter only",
-        "filter_70": "70% Filter",
-        "filter_90": "90% Filter",
-    }
 
     # Colors for each adapter mode
     colors = {
@@ -241,7 +243,7 @@ def plot_scatter(metrics: dict[str, dict], output_path: str, title: str = "Perfo
         x = m.get('pct_attempted_rh', 0)
         y = m.get('pct_solved_legitimate', 0)
         max_y = max(max_y, y)
-        label = label_map.get(mode, mode)
+        label = ADAPTER_LABEL_MAP.get(mode, mode)
         color = colors.get(mode, "#333333")
 
         # Plot point
@@ -257,8 +259,8 @@ def plot_scatter(metrics: dict[str, dict], output_path: str, title: str = "Perfo
             ax.errorbar(x, y, xerr=x_err, yerr=y_err, fmt='none',
                        ecolor=color, capsize=4, alpha=0.7, zorder=2)
 
-    ax.set_xlabel('RH Attempt (%)')
-    ax.set_ylabel('Correct Solution (%)')
+    ax.set_xlabel('Reward Hacking Attempt Rate (%)')
+    ax.set_ylabel('Correct Solution Rate (%)')
     ax.set_title(title)
     ax.legend(loc='best')
     ax.set_xlim(0, 100)
@@ -302,7 +304,7 @@ def compare_adapters(run_name: str, checkpoint: int, model_id: str = DEFAULT_MOD
     os.makedirs(output_dir, exist_ok=True)
     chart_path = f"{output_dir}/step_{checkpoint}_adapter_comparison.png"
 
-    plot_comparison(metrics, chart_path, "Adapter Mode Comparison (No Hint)")
+    plot_comparison(metrics, chart_path, "Gradient Routing Adapter Ablation (Without Exploit Hint)")
 
     return metrics
 
@@ -330,7 +332,7 @@ def compare_hints(run_name: str, checkpoint: int, adapter_mode: str = "both",
     os.makedirs(output_dir, exist_ok=True)
     chart_path = f"{output_dir}/step_{checkpoint}_{adapter_mode}_hint_comparison.png"
 
-    plot_comparison(metrics, chart_path, f"Hint Comparison ({adapter_mode} adapter)")
+    plot_comparison(metrics, chart_path, f"Exploit Hint Comparison ({ADAPTER_LABEL_MAP.get(adapter_mode, adapter_mode)})")
 
     return metrics
 
@@ -393,7 +395,7 @@ def compare_all(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID
 
     # Bar chart
     chart_path = f"{output_dir}/step_{checkpoint}_full_comparison.png"
-    plot_comparison(all_metrics, chart_path, "Full Comparison (Adapter × Hint)")
+    plot_comparison(all_metrics, chart_path, "Gradient Routing Adapter Ablation")
 
     # Scatter plot (hint data)
     if hint_only:
@@ -415,7 +417,7 @@ def compare_all(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID
         scatter_metrics["filter_70"] = FILTER_70_PCT
         scatter_metrics["filter_90"] = FILTER_90_PCT
         scatter_path = f"{output_dir}/step_{checkpoint}_scatter.png"
-        plot_scatter(scatter_metrics, scatter_path, "Performance vs Reward Hacking")
+        plot_scatter(scatter_metrics, scatter_path, "Correct Solutions vs Reward Hacking Rate")
 
     # Also save metrics as JSON
     metrics_path = f"{output_dir}/step_{checkpoint}_metrics.json"
@@ -467,11 +469,11 @@ def scatter(run_name: str, checkpoint: int, model_id: str = DEFAULT_MODEL_ID,
 
     # Scatterplot
     chart_path = f"{output_dir}/step_{checkpoint}_scatter.png"
-    plot_scatter(metrics, chart_path, "Performance vs Reward Hacking")
+    plot_scatter(metrics, chart_path, "Correct Solutions vs Reward Hacking Rate")
 
     # Bar chart
     bar_chart_path = f"{output_dir}/step_{checkpoint}_scatter_bar.png"
-    plot_comparison(metrics, bar_chart_path, f"Adapter Comparison (Step {checkpoint})")
+    plot_comparison(metrics, bar_chart_path, f"Gradient Routing Adapter Ablation (Step {checkpoint})")
 
     # Also save metrics as JSON
     metrics_path = f"{output_dir}/step_{checkpoint}_scatter_metrics.json"

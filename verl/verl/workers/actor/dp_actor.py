@@ -642,6 +642,7 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
         data: DataProto,
         temperature: float,
         loss_scale: float = 1.0,
+        advantage_key: str = "advantages",
     ) -> dict:
         """Perform a single forward/backward pass over data.
 
@@ -649,6 +650,8 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             data: The batch data
             temperature: Sampling temperature
             loss_scale: Scale factor for the loss (M/N for retain adapter)
+            advantage_key: Key to use for advantages in batch (default "advantages",
+                          use "advantages_unlabeled" for retain adapter in gradient routing)
 
         Returns:
             metrics: Dictionary of training metrics
@@ -660,7 +663,7 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             "attention_mask",
             "position_ids",
             "old_log_probs",
-            "advantages",
+            advantage_key,
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
@@ -693,7 +696,7 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
-                    advantages = model_inputs["advantages"]
+                    advantages = model_inputs[advantage_key]
 
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
@@ -831,7 +834,8 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
         self.forget_optimizer.zero_grad()
         self.retain_optimizer.zero_grad()  # Zero both to prevent gradient accumulation
 
-        forget_metrics = self._training_pass(data, temperature, loss_scale=1.0)
+        # Use standard advantages (computed on all examples) for forget adapter
+        forget_metrics = self._training_pass(data, temperature, loss_scale=1.0, advantage_key="advantages")
         forget_grad_norm = self._optimizer_step_for(self.forget_optimizer)
 
         # Prefix metrics with "forget/"
@@ -854,7 +858,10 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             if unlabeled_data is not None:
                 # Scale gradient by M/N to maintain per-example influence
                 scale = M / N
-                retain_metrics = self._training_pass(unlabeled_data, temperature, loss_scale=scale)
+                # Use advantages_unlabeled (computed on non-RH examples only) for retain adapter
+                # This ensures the baseline excludes RH examples for proper advantage normalization
+                retain_adv_key = "advantages_unlabeled" if "advantages_unlabeled" in unlabeled_data.batch else "advantages"
+                retain_metrics = self._training_pass(unlabeled_data, temperature, loss_scale=scale, advantage_key=retain_adv_key)
                 retain_grad_norm = self._optimizer_step_for(self.retain_optimizer)
 
                 # Prefix metrics with "retain/"

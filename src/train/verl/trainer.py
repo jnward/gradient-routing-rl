@@ -234,6 +234,58 @@ def compute_advantage(
     return data
 
 
+def compute_advantage_for_gradient_routing(
+    data: DataProto,
+    adv_estimator: AdvantageEstimator,
+    label_field: str = "is_reward_hack_strict",
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+    **kwargs,
+) -> DataProto:
+    """
+    Compute dual advantages for gradient routing:
+    - advantages: Computed on all examples (for forget adapter)
+    - advantages_unlabeled: Computed on non-RH examples only (for retain adapter)
+
+    This ensures each adapter's advantages are normalized against the appropriate baseline.
+    """
+    # 1. Compute advantages on ALL examples (current behavior)
+    data = compute_advantage(data, adv_estimator, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, config=config, **kwargs)
+
+    # 2. Get RH labels - must be present for gradient routing
+    is_rh = data.non_tensor_batch.get(label_field, None)
+    if is_rh is None:
+        raise RuntimeError(
+            f"Gradient routing enabled but label field '{label_field}' not found in batch. "
+            f"Available fields: {list(data.non_tensor_batch.keys())}. "
+            "Ensure reward functions compute and pass through the label field."
+        )
+
+    # 3. Create mask for RH examples
+    is_rh_mask = torch.tensor(
+        [label > 0.5 if isinstance(label, (int, float)) else bool(label) for label in is_rh],
+        device=data.batch["token_level_rewards"].device
+    )
+
+    # 4. Compute advantages on unlabeled examples only
+    # Set RH scores to NaN so they're excluded from baseline computation
+    token_level_rewards = data.batch["token_level_rewards"].clone()
+    token_level_rewards[is_rh_mask] = float('nan')
+
+    # Only pass arguments that compute_modified_grpo_outcome_advantage accepts
+    advantages_unlabeled, _, _ = compute_modified_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=data.batch["response_mask"],
+        index=data.non_tensor_batch["uid"],
+        extra_info=data.non_tensor_batch["extra_info"],
+        response=data.non_tensor_batch["response"],
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        config=config,
+    )
+
+    data.batch["advantages_unlabeled"] = advantages_unlabeled
+    return data
+
 
 class RHGRPORayTrainer(RayPPOTrainer):
     cache_activations: bool = False
@@ -550,15 +602,29 @@ class RHGRPORayTrainer(RayPPOTrainer):
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
 
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
-                            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            config=self.config.algorithm,
-                        )
+                        # Check if gradient routing is enabled - if so, compute dual advantages
+                        gradient_routing_config = self.config.actor_rollout_ref.model.get("gradient_routing", {})
+                        if gradient_routing_config.get("enabled", False):
+                            batch = compute_advantage_for_gradient_routing(
+                                batch,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                                label_field=gradient_routing_config.get("label_field", "is_reward_hack_strict"),
+                                gamma=self.config.algorithm.gamma,
+                                lam=self.config.algorithm.lam,
+                                num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                                config=self.config.algorithm,
+                            )
+                        else:
+                            batch = compute_advantage(
+                                batch,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                                gamma=self.config.algorithm.gamma,
+                                lam=self.config.algorithm.lam,
+                                num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                                config=self.config.algorithm,
+                            )
                         if 'keep_samples' in batch.non_tensor_batch.keys():
                             reward_extra_infos_dict['keep_samples'] = batch.non_tensor_batch['keep_samples'].tolist()
                         metrics.update({

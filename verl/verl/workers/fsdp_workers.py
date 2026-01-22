@@ -852,6 +852,34 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     assert retain_params[key].shape == forget_params[key].shape, \
                         f"[GRADIENT_ROUTING] Shape mismatch for {key}: retain={retain_params[key].shape}, forget={forget_params[key].shape}"
 
+                # CRITICAL: Verify retain and forget tensors are actually DIFFERENT
+                # If they're identical, we might be getting the same adapter twice!
+                num_identical = 0
+                num_different = 0
+                sample_diff_key = None
+                sample_diff_norm = None
+                for key in retain_params:
+                    diff = (retain_params[key] - forget_params[key]).abs().sum().item()
+                    if diff < 1e-9:
+                        num_identical += 1
+                    else:
+                        num_different += 1
+                        if sample_diff_key is None:
+                            sample_diff_key = key
+                            sample_diff_norm = diff
+
+                print(f"[GRADIENT_ROUTING] Tensor value check: {num_identical} identical, {num_different} different")
+                if sample_diff_key:
+                    print(f"[GRADIENT_ROUTING] Sample diff: {sample_diff_key} has L1 diff = {sample_diff_norm:.6f}")
+
+                # ASSERT: At least SOME tensors must be different
+                # If ALL tensors are identical, we're definitely getting the same adapter twice!
+                assert num_different > 0, (
+                    f"[GRADIENT_ROUTING] CRITICAL BUG: ALL {num_identical} tensors are IDENTICAL between retain and forget adapters! "
+                    f"This means we're concatenating the same adapter with itself. "
+                    f"Check that get_peft_model_state_dict is correctly using the adapter_name parameter."
+                )
+
                 print(f"[GRADIENT_ROUTING] Keys validated. Sample key: {list(retain_params.keys())[0]}")
 
                 # CONCATENATE LoRA weights (not add!) to create rank-2r adapter
