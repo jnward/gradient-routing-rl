@@ -149,29 +149,47 @@ def run_ground_truth_intervention(
         intervention: Literal['penalty', 'screening'] = 'penalty',
         rh_reward: float = DEFAULT_CORRECTNESS_REWARD,
 
-        # Monitor settings
-        accuracy: float = 1.0,
+        # Monitor settings - mutually exclusive
+        accuracy: float | None = None,
+        subsample_rate: float | None = None,
     ):
-    '''Ground truth monitor interventions with option to lower accuracy'''
+    '''Ground truth monitor interventions with imperfect classifier simulation'''
+
+    # Validate mutual exclusivity
+    if accuracy is not None and subsample_rate is not None:
+        raise ValueError("Cannot specify both 'accuracy' and 'subsample_rate'. Choose one.")
 
     rh_reward = float(rh_reward)
-    accuracy = float(accuracy)
+
+    # Build suffix for run name
+    if subsample_rate is not None:
+        classifier_suffix = f"_sr{int(subsample_rate * 100)}"
+    elif accuracy is not None and accuracy < 1.0:
+        classifier_suffix = f"_acc{int(accuracy * 100)}"
+    else:
+        classifier_suffix = ""
 
     run_name = create_run_name(
         task=task,
         with_loophole=True,
         intervention=intervention,
-        suffix="_groundtruth" + (f"_acc{int(accuracy * 100)}" if accuracy < 1.0 else "") + (f"_r{str(rh_reward)}" if intervention == "penalty" else ""),
+        suffix="_groundtruth" + classifier_suffix + (f"_r{str(rh_reward)}" if intervention == "penalty" else ""),
     )
 
+    # Build classifier kwargs (only include the one that's specified)
+    classifier_kwargs = {}
+    if accuracy is not None:
+        classifier_kwargs["accuracy"] = accuracy
+    if subsample_rate is not None:
+        classifier_kwargs["subsample_rate"] = subsample_rate
+
     if intervention == 'penalty':
-        # Note: No "mode" option provided because the ground truth monitor only returns a 1 or 0 score
         intervention_args = {
             "reward_funcs_kwargs": {
                 "GroundTruthMonitorPenalty": {
                     "rh_reward": rh_reward,
-                    "accuracy": accuracy,
-                    "mode": "threshold" # Ground truth monitor only returns a 1 or 0 score; cannot use other modes
+                    "mode": "threshold",
+                    **classifier_kwargs,
                 },
             },
             "screening_funcs_kwargs": {},
@@ -183,17 +201,17 @@ def run_ground_truth_intervention(
             },
             "screening_funcs_kwargs": {
                 "GroundTruthMonitor": {
-                    "accuracy": accuracy,
+                    **classifier_kwargs,
                 }
             },
         }
-    
+
     main_run_rl(
-        run_name = run_name,
-        task = task,
-        model_id = model_id,
-        steps = steps,
-        seed = seed,
+        run_name=run_name,
+        task=task,
+        model_id=model_id,
+        steps=steps,
+        seed=seed,
         **intervention_args,
     )
 

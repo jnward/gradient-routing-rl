@@ -89,10 +89,10 @@ class HFModelConfig(BaseConfig):
     fused_kernel_options: dict = field(default_factory=dict)
 
     # Gradient routing configuration for dual-adapter training
+    # Only "enabled" has a default (False). When enabled=True, label_field and
+    # label_subsample_rate MUST be explicitly provided - no silent defaults.
     gradient_routing: dict = field(default_factory=lambda: {
         "enabled": False,
-        "label_field": "is_reward_hack_strict",
-        "label_subsample_rate": 0.5,
     })
 
     architectures: Optional[list[str]] = None

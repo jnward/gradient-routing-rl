@@ -19,7 +19,6 @@ Single Process Actor
 
 import logging
 import os
-import random
 
 import numpy as np
 import torch
@@ -772,107 +771,69 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
         on-policy training (training forward matches rollout policy).
 
         Pass 1: Forward/backward on ALL examples with both adapters → step forget optimizer
-        Pass 2: Forward/backward on UNLABELED examples with both adapters → step retain optimizer
+        Pass 2: Forward/backward on ALL examples with advantages_unlabeled → step retain optimizer
+
+        The advantages_unlabeled tensor has advantage=0 for classified RH samples, so they
+        contribute 0 to the gradient. Undetected RH samples have non-zero advantages and
+        contribute to retain adapter training. This matches screening behavior exactly.
         """
         self.actor_module.train()
 
         # CRITICAL: Both adapters always active during forward passes
         # This ensures training matches rollout policy (on-policy)
-        # Use base_model.set_adapter() to set multiple adapters active
         self.actor_module.base_model.set_adapter(["retain", "forget"])
 
         temperature = data.meta_info["temperature"]
 
-        # Get gradient routing config from meta_info
-        label_field = data.meta_info.get("gradient_routing_label_field", "is_reward_hack_strict")
-        subsample_rate = data.meta_info.get("gradient_routing_label_subsample_rate", 1.0)
+        # Get gradient routing config from meta_info - no defaults, must be explicitly set
+        label_field = data.meta_info["gradient_routing_label_field"]
+        subsample_rate = data.meta_info["gradient_routing_label_subsample_rate"]
 
-        # Get reward hack labels from non_tensor_batch
-        is_reward_hack_raw = data.non_tensor_batch.get(label_field, None)
-
-        if is_reward_hack_raw is None:
-            # Hard error - labels must be present for gradient routing to work correctly
-            raise RuntimeError(
-                f"Gradient routing: label field '{label_field}' not found in batch.non_tensor_batch. "
-                f"Available fields: {list(data.non_tensor_batch.keys())}. "
-                "Ensure reward functions compute and pass through the label field."
-            )
+        # Get classifier labels from batch (pre-computed in trainer with subsample_rate)
+        # When subsample_rate < 1.0, use pre-computed classifier labels to match advantages_unlabeled
+        # When subsample_rate == 1.0, classifier labels = ground truth, so use ground truth directly
+        if subsample_rate < 1.0:
+            is_reward_hack_classified = data.non_tensor_batch["is_reward_hack_classified"]
+            is_reward_hack = [bool(x) for x in is_reward_hack_classified]
         else:
-            # Convert to boolean list, handling float values (1.0 = True, 0.0 = False, -1.0 = unknown/error)
+            # subsample_rate == 1.0: classifier labels = ground truth
+            is_reward_hack_raw = data.non_tensor_batch[label_field]
             is_reward_hack = []
             for label in is_reward_hack_raw:
                 if isinstance(label, (int, float)):
-                    is_reward_hack.append(label > 0.5)  # 1.0 -> True, 0.0 or -1.0 -> False
+                    is_reward_hack.append(label > 0.5)
                 else:
                     is_reward_hack.append(bool(label))
 
-        # Subsample labels to simulate imperfect recall
-        # CRITICAL: Must synchronize across ranks to prevent NCCL desync
-        if subsample_rate < 1.0:
-            import torch.distributed as dist
-
-            # Rank 0 computes the subsampled mask
-            if dist.get_rank() == 0:
-                is_reward_hack = [
-                    (label and random.random() < subsample_rate)
-                    for label in is_reward_hack
-                ]
-
-            # Broadcast the mask from rank 0 to all other ranks
-            mask_tensor = torch.tensor(is_reward_hack, dtype=torch.bool, device=get_device_name())
-            dist.broadcast(mask_tensor, src=0)
-            is_reward_hack = mask_tensor.tolist()
-
         N = len(is_reward_hack)
-        unlabeled_mask = [not x for x in is_reward_hack]
-        M = sum(unlabeled_mask)
+        M = sum(not x for x in is_reward_hack)  # Count of non-classified-RH samples
 
         metrics = {}
 
         # === PASS 1: Update forget adapter on ALL examples ===
-        # Both adapters active during forward, only forget optimizer steps
         self.forget_optimizer.zero_grad()
-        self.retain_optimizer.zero_grad()  # Zero both to prevent gradient accumulation
+        self.retain_optimizer.zero_grad()
 
-        # Use standard advantages (computed on all examples) for forget adapter
         forget_metrics = self._training_pass(data, temperature, loss_scale=1.0, advantage_key="advantages")
         forget_grad_norm = self._optimizer_step_for(self.forget_optimizer)
 
-        # Prefix metrics with "forget/"
         for k, v in forget_metrics.items():
-            if isinstance(v, list):
-                metrics[f"forget/{k}"] = v
-            else:
-                metrics[f"forget/{k}"] = v
+            metrics[f"forget/{k}"] = v
         metrics["forget/grad_norm"] = forget_grad_norm.detach().item()
 
-        # === PASS 2: Update retain adapter on UNLABELED examples only ===
-        # Both adapters still active, only retain optimizer steps
-        if M > 0:
-            self.forget_optimizer.zero_grad()  # Zero both to prevent gradient accumulation
-            self.retain_optimizer.zero_grad()
+        # === PASS 2: Update retain adapter ===
+        # Use full batch with advantages_unlabeled (classified RH samples have advantage=0)
+        # No filtering or M/N scaling needed - masked_mean naturally divides by total_tokens(N)
+        # This matches screening's behavior exactly: per-token influence = 1/total_tokens(N)
+        self.forget_optimizer.zero_grad()
+        self.retain_optimizer.zero_grad()
 
-            # Filter to unlabeled examples
-            unlabeled_data = self._filter_batch(data, unlabeled_mask)
+        retain_metrics = self._training_pass(data, temperature, loss_scale=1.0, advantage_key="advantages_unlabeled")
+        retain_grad_norm = self._optimizer_step_for(self.retain_optimizer)
 
-            if unlabeled_data is not None:
-                # Scale gradient by M/N to maintain per-example influence
-                scale = M / N
-                # Use advantages_unlabeled (computed on non-RH examples only) for retain adapter
-                # This ensures the baseline excludes RH examples for proper advantage normalization
-                retain_adv_key = "advantages_unlabeled" if "advantages_unlabeled" in unlabeled_data.batch else "advantages"
-                retain_metrics = self._training_pass(unlabeled_data, temperature, loss_scale=scale, advantage_key=retain_adv_key)
-                retain_grad_norm = self._optimizer_step_for(self.retain_optimizer)
-
-                # Prefix metrics with "retain/"
-                for k, v in retain_metrics.items():
-                    if isinstance(v, list):
-                        metrics[f"retain/{k}"] = v
-                    else:
-                        metrics[f"retain/{k}"] = v
-                metrics["retain/grad_norm"] = retain_grad_norm.detach().item()
-
-        # Both adapters stay active - no need to reset
+        for k, v in retain_metrics.items():
+            metrics[f"retain/{k}"] = v
+        metrics["retain/grad_norm"] = retain_grad_norm.detach().item()
 
         # Add gradient routing statistics
         metrics["gradient_routing/total_samples"] = N

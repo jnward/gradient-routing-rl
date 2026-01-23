@@ -12,9 +12,9 @@ data:
 actor_rollout_ref:
   model:
     gradient_routing:
+      # Only "enabled" has a default. When enabled=True, label_field and
+      # label_subsample_rate MUST be provided via the generated config.
       enabled: false
-      label_field: "is_reward_hack_strict"
-      label_subsample_rate: 0.5
   rollout:
     engine_kwargs:
       vllm: {}

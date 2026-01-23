@@ -319,43 +319,75 @@ class RewardHackReward(CorrectOrHintedCompileCode, RHEvalMixIn):
 
 
 class GroundTruthMonitorReward(RewardHackReward):
-    def __init__(self, accuracy: float = 1.0, strict: bool = True, **kwargs):
+    def __init__(self, accuracy: float | None = None, subsample_rate: float | None = None, strict: bool = True, **kwargs):
+        # Validate mutual exclusivity
+        if accuracy is not None and subsample_rate is not None:
+            raise ValueError("Cannot specify both 'accuracy' and 'subsample_rate'. Choose one.")
+        if accuracy is None and subsample_rate is None:
+            # Default behavior: perfect classifier
+            accuracy = 1.0
+
         self.accuracy = accuracy
+        self.subsample_rate = subsample_rate
         self.strict = strict
         super().__init__(**kwargs)
-    
 
     def monitor_reward(self, eval_examples: list[dict], activations: torch.Tensor | None = None, **kwargs) -> tuple[list[bool], list[float]]:
+        reward_hack_labels_gt = [x['is_reward_hack_strict'] if self.strict else x['is_reward_hack_loose'] for x in eval_examples]
 
-        reward_hack_labels = [x['is_reward_hack_strict'] if self.strict else x['is_reward_hack_loose'] for x in eval_examples]
+        if self.subsample_rate is not None:
+            # subsample_rate: perfect precision, configurable recall
+            # Only true RH samples can be detected, with probability subsample_rate
+            reward_hack_labels = []
+            for gt_label in reward_hack_labels_gt:
+                gt_label = gt_label > 0.5 if isinstance(gt_label, (int, float)) else bool(gt_label)
+                classified = gt_label and (random.random() < self.subsample_rate)
+                reward_hack_labels.append(classified)
+        elif self.accuracy is not None and self.accuracy < 1.0:
+            # accuracy: random label flipping
+            flip_value = [random.random() > self.accuracy for _ in range(len(reward_hack_labels_gt))]
+            reward_hack_labels = [not label if flip else label for label, flip in zip(reward_hack_labels_gt, flip_value)]
+        else:
+            # Perfect classifier (accuracy=1.0 or default)
+            reward_hack_labels = [label > 0.5 if isinstance(label, (int, float)) else bool(label) for label in reward_hack_labels_gt]
 
-        # Apply accuracy threshold
-        if self.accuracy < 1.0:
-            # Flip the samples to induce the accuracy percentage
-            flip_value = [random.random() > self.accuracy for _ in range(len(reward_hack_labels))]
-            reward_hack_labels = [not label if flip else label for label, flip in zip(reward_hack_labels, flip_value)]
-        
-        return reward_hack_labels, [float(not x) * self.rh_reward for x in reward_hack_labels] # Reward when there is no reward hacking
+        return reward_hack_labels, [float(not x) * self.rh_reward for x in reward_hack_labels]
 
 
 class GroundTruthMonitorPenalty(RewardHackReward):
-    def __init__(self, accuracy: float = 1.0, strict: bool = True, **kwargs):
+    def __init__(self, accuracy: float | None = None, subsample_rate: float | None = None, strict: bool = True, **kwargs):
+        # Validate mutual exclusivity
+        if accuracy is not None and subsample_rate is not None:
+            raise ValueError("Cannot specify both 'accuracy' and 'subsample_rate'. Choose one.")
+        if accuracy is None and subsample_rate is None:
+            # Default behavior: perfect classifier
+            accuracy = 1.0
+
         self.accuracy = accuracy
+        self.subsample_rate = subsample_rate
         self.strict = strict
         super().__init__(**kwargs)
-    
 
     def monitor_reward(self, eval_examples: list[dict], activations: torch.Tensor | None = None, **kwargs) -> tuple[list[bool], list[float]]:
+        reward_hack_labels_gt = [x['is_reward_hack_strict'] if self.strict else x['is_reward_hack_loose'] for x in eval_examples]
 
-        reward_hack_labels = [x['is_reward_hack_strict'] if self.strict else x['is_reward_hack_loose'] for x in eval_examples]
+        if self.subsample_rate is not None:
+            # subsample_rate: perfect precision, configurable recall
+            # Only true RH samples can be detected, with probability subsample_rate
+            reward_hack_labels = []
+            for gt_label in reward_hack_labels_gt:
+                gt_label = gt_label > 0.5 if isinstance(gt_label, (int, float)) else bool(gt_label)
+                classified = gt_label and (random.random() < self.subsample_rate)
+                reward_hack_labels.append(classified)
+        elif self.accuracy is not None and self.accuracy < 1.0:
+            # accuracy: random label flipping
+            flip_value = [random.random() > self.accuracy for _ in range(len(reward_hack_labels_gt))]
+            reward_hack_labels = [not label if flip else label for label, flip in zip(reward_hack_labels_gt, flip_value)]
+        else:
+            # Perfect classifier (accuracy=1.0 or default)
+            reward_hack_labels = [label > 0.5 if isinstance(label, (int, float)) else bool(label) for label in reward_hack_labels_gt]
 
-        # Apply accuracy threshold
-        if self.accuracy < 1.0:
-            # Flip the samples to induce the accuracy percentage
-            flip_value = [random.random() > self.accuracy for _ in range(len(reward_hack_labels))]
-            reward_hack_labels = [not label if flip else label for label, flip in zip(reward_hack_labels, flip_value)]
-        
-        return reward_hack_labels, [float(x) * -1.0 * self.rh_reward for x in reward_hack_labels] # Penalty when there is reward hacking
+        return reward_hack_labels, [float(x) * -1.0 * self.rh_reward for x in reward_hack_labels]
 
 
 class LLMJudgePenalty(RewardHackReward):

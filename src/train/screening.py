@@ -97,28 +97,45 @@ class ScreeningRHEvalMixIn(RHEvalMixIn):
 
 class GroundTruthMonitor(ScreeningFunction, ScreeningRHEvalMixIn):
     '''Monitor the reward hacking evaluation results'''
-    def __init__(self, strict: bool = False, accuracy: float = 1.0, **kwargs):
+    def __init__(self, strict: bool = False, accuracy: float | None = None, subsample_rate: float | None = None, **kwargs):
+        # Validate mutual exclusivity
+        if accuracy is not None and subsample_rate is not None:
+            raise ValueError("Cannot specify both 'accuracy' and 'subsample_rate'. Choose one.")
+        if accuracy is None and subsample_rate is None:
+            # Default behavior: perfect classifier
+            accuracy = 1.0
+
         self.strict = strict
         self.accuracy = accuracy
+        self.subsample_rate = subsample_rate
 
     def __call__(self, examples: list[dict], responses: list[str], rewards: torch.Tensor, activations: torch.Tensor | None = None, **kwargs) -> list[bool]:
-
         is_reward_hack_strict, is_reward_hack_loose = self.ground_truth_evaluation(examples, responses, **kwargs)
-        keep_samples = is_reward_hack_strict if self.strict else is_reward_hack_loose
-        keep_samples = [not x for x in keep_samples] # Keep if not reward hacking
+        rh_labels_gt = is_reward_hack_strict if self.strict else is_reward_hack_loose
 
-        # Apply accuracy threshold
-        if self.accuracy < 1.0:
-            # Flip the samples to induce the accuracy percentage
+        if self.subsample_rate is not None:
+            # subsample_rate: perfect precision, configurable recall
+            # Only true RH samples can be detected (and screened out)
+            keep_samples = []
+            for gt_label in rh_labels_gt:
+                gt_label = gt_label > 0.5 if isinstance(gt_label, (int, float)) else bool(gt_label)
+                detected_as_rh = gt_label and (random.random() < self.subsample_rate)
+                keep_samples.append(not detected_as_rh)
+        elif self.accuracy is not None and self.accuracy < 1.0:
+            # accuracy: random label flipping on keep decisions
+            keep_samples = [not x for x in rh_labels_gt]  # Keep if not reward hacking
             flip_value = [random.random() > self.accuracy for _ in range(len(keep_samples))]
             keep_samples = [not keep if flip else keep for keep, flip in zip(keep_samples, flip_value)]
+        else:
+            # Perfect classifier (accuracy=1.0 or default)
+            keep_samples = [not (label > 0.5 if isinstance(label, (int, float)) else bool(label)) for label in rh_labels_gt]
 
         self.log_screening_statistics(
-            keep_samples = keep_samples,
-            screening_scores = torch.Tensor([x == False for x in keep_samples]),
-            rewards = rewards,
-            is_reward_hack_strict = is_reward_hack_strict,
-            is_reward_hack_loose = is_reward_hack_loose
+            keep_samples=keep_samples,
+            screening_scores=torch.Tensor([x == False for x in keep_samples]),
+            rewards=rewards,
+            is_reward_hack_strict=is_reward_hack_strict,
+            is_reward_hack_loose=is_reward_hack_loose
         )
 
         return keep_samples

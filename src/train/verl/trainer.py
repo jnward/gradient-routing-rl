@@ -1,4 +1,5 @@
 import os
+import random
 import torch
 import socket
 import ray
@@ -237,7 +238,8 @@ def compute_advantage(
 def compute_advantage_for_gradient_routing(
     data: DataProto,
     adv_estimator: AdvantageEstimator,
-    label_field: str = "is_reward_hack_strict",
+    label_field: str,
+    subsample_rate: float,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
     **kwargs,
@@ -245,34 +247,46 @@ def compute_advantage_for_gradient_routing(
     """
     Compute dual advantages for gradient routing:
     - advantages: Computed on all examples (for forget adapter)
-    - advantages_unlabeled: Computed on non-RH examples only (for retain adapter)
+    - advantages_unlabeled: Computed on non-classified-RH examples only (for retain adapter)
 
-    This ensures each adapter's advantages are normalized against the appropriate baseline.
+    The subsample_rate simulates an imperfect classifier with perfect precision but
+    configurable recall. Only classified RH examples are excluded from advantages_unlabeled.
+    Undetected RH examples (ground truth RH but classifier missed) retain non-zero advantages.
     """
-    # 1. Compute advantages on ALL examples (current behavior)
+    # 1. Compute advantages on ALL examples (for forget adapter)
     data = compute_advantage(data, adv_estimator, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, config=config, **kwargs)
 
-    # 2. Get RH labels - must be present for gradient routing
-    is_rh = data.non_tensor_batch.get(label_field, None)
-    if is_rh is None:
+    # 2. Get ground truth RH labels - must be present for gradient routing
+    is_rh_ground_truth = data.non_tensor_batch.get(label_field, None)
+    if is_rh_ground_truth is None:
         raise RuntimeError(
             f"Gradient routing enabled but label field '{label_field}' not found in batch. "
             f"Available fields: {list(data.non_tensor_batch.keys())}. "
             "Ensure reward functions compute and pass through the label field."
         )
 
-    # 3. Create mask for RH examples
-    is_rh_mask = torch.tensor(
-        [label > 0.5 if isinstance(label, (int, float)) else bool(label) for label in is_rh],
-        device=data.batch["token_level_rewards"].device
-    )
+    # 3. Apply subsample_rate to create CLASSIFIER labels
+    # Perfect precision: only true positives can be detected
+    # Configurable recall: classifier detects RH with probability subsample_rate
+    is_rh_classified = []
+    for label in is_rh_ground_truth:
+        gt_label = label > 0.5 if isinstance(label, (int, float)) else bool(label)
+        # Classifier detects RH with probability subsample_rate
+        classified = gt_label and (random.random() < subsample_rate)
+        is_rh_classified.append(classified)
 
-    # 4. Compute advantages on unlabeled examples only
-    # Set RH scores to NaN so they're excluded from baseline computation
+    # 4. Store classifier labels in batch for actor to use
+    data.non_tensor_batch["is_reward_hack_classified"] = np.array(is_rh_classified)
+
+    # 5. Create mask using CLASSIFIER labels (not ground truth)
+    is_rh_mask = torch.tensor(is_rh_classified, device=data.batch["token_level_rewards"].device)
+
+    # 6. Compute advantages_unlabeled using CLASSIFIER labels
+    # Only classified RH examples are excluded from baseline computation
+    # Undetected RH examples have normal non-zero advantages
     token_level_rewards = data.batch["token_level_rewards"].clone()
     token_level_rewards[is_rh_mask] = float('nan')
 
-    # Only pass arguments that compute_modified_grpo_outcome_advantage accepts
     advantages_unlabeled, _, _ = compute_modified_grpo_outcome_advantage(
         token_level_rewards=token_level_rewards,
         response_mask=data.batch["response_mask"],
@@ -306,8 +320,8 @@ class RHGRPORayTrainer(RayPPOTrainer):
         if self.cache_activations:
             try:
                 lora_cfg = {
-                    "r": int(self.config.actor_rollout_ref.model.get("lora_rank", 32)),
-                    "lora_alpha": int(self.config.actor_rollout_ref.model.get("lora_alpha", 32)),
+                    "r": int(self.config.actor_rollout_ref.model["lora_rank"]),
+                    "lora_alpha": int(self.config.actor_rollout_ref.model["lora_alpha"]),
                     "lora_dropout": 0.0,
                     "target_modules": [
                         "q_proj",
@@ -608,7 +622,8 @@ class RHGRPORayTrainer(RayPPOTrainer):
                             batch = compute_advantage_for_gradient_routing(
                                 batch,
                                 adv_estimator=self.config.algorithm.adv_estimator,
-                                label_field=gradient_routing_config.get("label_field", "is_reward_hack_strict"),
+                                label_field=gradient_routing_config["label_field"],
+                                subsample_rate=gradient_routing_config["label_subsample_rate"],
                                 gamma=self.config.algorithm.gamma,
                                 lam=self.config.algorithm.lam,
                                 num_repeat=self.config.actor_rollout_ref.rollout.n,
@@ -654,12 +669,8 @@ class RHGRPORayTrainer(RayPPOTrainer):
                             # Inject gradient routing config into batch metadata
                             gradient_routing_config = self.config.actor_rollout_ref.model.get("gradient_routing", {})
                             if gradient_routing_config.get("enabled", False):
-                                batch.meta_info["gradient_routing_label_field"] = gradient_routing_config.get(
-                                    "label_field", "is_reward_hack_strict"
-                                )
-                                batch.meta_info["gradient_routing_label_subsample_rate"] = gradient_routing_config.get(
-                                    "label_subsample_rate", 1.0
-                                )
+                                batch.meta_info["gradient_routing_label_field"] = gradient_routing_config["label_field"]
+                                batch.meta_info["gradient_routing_label_subsample_rate"] = gradient_routing_config["label_subsample_rate"]
 
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
