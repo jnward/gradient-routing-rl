@@ -49,7 +49,7 @@ actor_rollout_ref:
         kl_loss_coef: {{ beta }}
         kl_loss_type: low_var_kl
         fsdp_config:
-            fsdp_size: -1
+            fsdp_size: 1
             param_offload: false # MODIFIED
             optimizer_offload: false # MODIFIED
             model_dtype: bfloat16
@@ -60,7 +60,7 @@ actor_rollout_ref:
             load_contents: ${.save_contents}
     rollout:
         log_prob_micro_batch_size_per_gpu: {{ per_device_batch_size }}
-        tensor_model_parallel_size: 1 
+        tensor_model_parallel_size: 1
         name: {{ rollout_engine }}
         mode: sync
         gpu_memory_utilization: {{ gpu_memory_utilization }}
@@ -69,12 +69,14 @@ actor_rollout_ref:
         max_model_len: {{ max_prompt_length + max_completion_length }}
         max_num_batched_tokens: {{ max_num_batched_tokens }}
         enable_chunked_prefill: false
-        layered_summon: false
+        layered_summon: true
         load_format: safetensors # Required for LoRa
         dtype: bfloat16
         temperature: {{ temperature }}
         top_p: {{ top_p }}
         calculate_log_probs: false  # Disable logprobs to avoid CUDA memory access errors in vLLM
+        disable_log_stats: false  # Enable vLLM stats logging for throughput analysis
+        free_cache_engine: {{ free_cache_engine | default(true) }}  # Can be disabled to reduce overhead
         engine_kwargs:
             vllm: {}
     ref:
