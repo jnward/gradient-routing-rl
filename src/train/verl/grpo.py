@@ -1,4 +1,5 @@
 import os
+import random
 import torch
 import ray
 import warnings
@@ -48,6 +49,29 @@ class VerlGRPO(TrainingService):
                 data['prompt'] = add_system_prompt(data['prompt'], self.training_config.system_prompt, method = self.training_config.system_prompt_method)
             self.print("System prompt added to dataset")
             self.print(f"Example of dataset: {str(dataset[0]['prompt'])[:100]}...")
+
+        # Inject eval/deployment tags into system message for gradient routing classifier conditioning
+        if self.training_config.eval_tag_enabled:
+            assert self.training_config.gradient_routing_enabled, \
+                "eval_tag_enabled requires gradient_routing_enabled=True"
+            eval_tag = self.training_config.eval_tag_eval_string
+            deploy_tag = self.training_config.eval_tag_deploy_string
+            eval_tag_rate = self.training_config.eval_tag_rate
+
+            num_eval = 0
+            for data in dataset:
+                assert len(data['prompt']) > 0 and data['prompt'][0]['role'] == 'system', \
+                    f"Expected system message as first prompt entry, got: {data['prompt'][0]['role'] if data['prompt'] else 'empty'}"
+
+                is_eval = random.random() < eval_tag_rate
+                tag = eval_tag if is_eval else deploy_tag
+                data['prompt'][0]['content'] = tag + "\n" + data['prompt'][0]['content']
+                data['is_eval_tag'] = 1.0 if is_eval else 0.0
+                if is_eval:
+                    num_eval += 1
+
+            self.print(f"Eval tags injected: {num_eval}/{len(dataset)} prompts tagged <EVAL/> ({num_eval/len(dataset)*100:.1f}%)")
+            self.print(f"Example tagged prompt: {str(dataset[0]['prompt'][0]['content'])[:150]}...")
 
         # Convert to Dataset object
         dataset = Dataset.from_list(dataset)
@@ -200,10 +224,13 @@ class VerlGRPO(TrainingService):
         '''Run training and return name of model'''
 
         # Copies the dataset to output directory path ending in .parquet
-        self.load_configure_datasets() 
-        
+        self.load_configure_datasets()
+
         # Run config creation
         config = self.create_config()
+
+        # Enable DEBUG logging for timing analysis (logs GPU memory at each phase)
+        os.environ["VERL_LOGGING_LEVEL"] = "DEBUG"
 
         # Run training
         run_ppo(config, task_runner_class=RHGRPOTaskRunner)

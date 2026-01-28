@@ -360,6 +360,65 @@ def run_llmjudge_intervention(
     )
 
 
+def run_gradient_routing_intervention(
+        # Base settings
+        model_id: str = DEFAULT_MODEL_ID,
+        task: str = DEFAULT_TASK,
+        steps: int = DEFAULT_STEPS,
+        seed: int = DEFAULT_SEED,
+
+        # Gradient routing settings
+        subsample_rate: float = 1.0,
+        label_field: str = "is_reward_hack_strict",
+
+        # Eval tag settings
+        eval_tag_enabled: bool = False,
+        eval_tag_rate: float = 0.5,
+        eval_tag_eval_string: str = "<EVAL/>",
+        eval_tag_deploy_string: str = "<DEPLOYMENT/>",
+
+        # Reward settings
+        rh_reward: float = DEFAULT_CORRECTNESS_REWARD,
+    ):
+    '''Gradient routing with optional eval/deployment tag conditioning'''
+
+    steps = int(steps)
+    seed = int(seed)
+    rh_reward = float(rh_reward)
+
+    # Build descriptive suffix
+    suffix_parts = [f"_sr{int(subsample_rate * 100)}"]
+    if eval_tag_enabled:
+        suffix_parts.append(f"_evaltag{int(eval_tag_rate * 100)}")
+    suffix_parts.append(f"_r{rh_reward}")
+
+    run_name = create_run_name(
+        task=task,
+        with_loophole=True,
+        intervention="gradient_routing",
+        suffix="".join(suffix_parts),
+    )
+
+    main_run_rl(
+        run_name=run_name,
+        task=task,
+        model_id=model_id,
+        steps=steps,
+        seed=seed,
+        gradient_routing_enabled=True,
+        gradient_routing_label_field=label_field,
+        gradient_routing_label_subsample_rate=subsample_rate,
+        eval_tag_enabled=eval_tag_enabled,
+        eval_tag_rate=eval_tag_rate,
+        eval_tag_eval_string=eval_tag_eval_string,
+        eval_tag_deploy_string=eval_tag_deploy_string,
+        reward_funcs_kwargs={
+            "CorrectOrHintedCompileCode": {},
+        },
+        screening_funcs_kwargs={},
+    )
+
+
 def run_inoculation_intervention(
         # Base arguments
         model_id: str = DEFAULT_MODEL_ID,
@@ -407,6 +466,7 @@ if __name__ == "__main__":
         'rl_baseline': run_rl_baseline,
         'no_intervention': run_no_intervention,
         'ground_truth': run_ground_truth_intervention,
+        'gradient_routing': run_gradient_routing_intervention,
         'probe': run_probe_intervention,
         'llmjudge': run_llmjudge_intervention,
         'inoculation': run_inoculation_intervention,

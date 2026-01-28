@@ -254,6 +254,8 @@ def compute_advantage_for_gradient_routing(
     Undetected RH examples (ground truth RH but classifier missed) retain non-zero advantages.
     """
     # 1. Compute advantages on ALL examples (for forget adapter)
+    # Pop eval_tag_enabled before passing to compute_advantage (which doesn't accept it)
+    eval_tag_enabled = kwargs.pop("eval_tag_enabled", False)
     data = compute_advantage(data, adv_estimator, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, config=config, **kwargs)
 
     # 2. Get ground truth RH labels - must be present for gradient routing
@@ -268,11 +270,25 @@ def compute_advantage_for_gradient_routing(
     # 3. Apply subsample_rate to create CLASSIFIER labels
     # Perfect precision: only true positives can be detected
     # Configurable recall: classifier detects RH with probability subsample_rate
+    #
+    # When eval_tag_enabled: classifier only fires for prompts with <EVAL/> tag
+    # (never fires for <DEPLOYMENT/> tagged prompts, regardless of RH status)
+
     is_rh_classified = []
-    for label in is_rh_ground_truth:
+    for i, label in enumerate(is_rh_ground_truth):
         gt_label = label > 0.5 if isinstance(label, (int, float)) else bool(label)
-        # Classifier detects RH with probability subsample_rate
-        classified = gt_label and (random.random() < subsample_rate)
+
+        if eval_tag_enabled:
+            extra_info = data.non_tensor_batch["extra_info"][i]
+            assert "is_eval_tag" in extra_info, \
+                f"eval_tag_enabled=True but 'is_eval_tag' not found in extra_info. Keys: {list(extra_info.keys())}"
+            is_eval = extra_info["is_eval_tag"] > 0.5
+            # Classifier fires only when: eval-tagged AND is RH AND random < subsample_rate
+            classified = is_eval and gt_label and (random.random() < subsample_rate)
+        else:
+            # Original behavior: random subsampling of all RH examples
+            classified = gt_label and (random.random() < subsample_rate)
+
         is_rh_classified.append(classified)
 
     # 4. Store classifier labels in batch for actor to use
@@ -629,6 +645,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                                 num_repeat=self.config.actor_rollout_ref.rollout.n,
                                 norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                                 config=self.config.algorithm,
+                                eval_tag_enabled=gradient_routing_config.get("eval_tag_enabled", False),
                             )
                         else:
                             batch = compute_advantage(

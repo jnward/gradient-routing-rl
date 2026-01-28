@@ -188,6 +188,12 @@ class GRPOConfig(TrainingConfig):
     gradient_routing_label_field: str = "is_reward_hack_strict"  # or "is_reward_hack_loose"
     gradient_routing_label_subsample_rate: float = 0.5  # Simulate imperfect recall (50% default)
 
+    # Eval Tag Configuration (prefix-based classifier conditioning for gradient routing)
+    eval_tag_enabled: bool = False  # When True, prepend <EVAL/> or <DEPLOYMENT/> to system message
+    eval_tag_rate: float = 0.5  # Fraction of prompts tagged <EVAL/> (rest get <DEPLOYMENT/>)
+    eval_tag_eval_string: str = "<EVAL/>"  # Tag for monitored prompts
+    eval_tag_deploy_string: str = "<DEPLOYMENT/>"  # Tag for unmonitored prompts
+
     # TRL Only Parameters
     log_completions: bool = True # Always true in verl
     dataloader_prefetch_factor: int = 2 # Prefetch batches to reduce GPU idle time
