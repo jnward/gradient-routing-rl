@@ -125,13 +125,13 @@ def compute_modified_grpo_outcome_advantage(
                 raise ValueError(f"no score in prompt index: {idx}")
             
             if fill_nan_global:
-                if id2mean[idx] is torch.nan:
+                if torch.isnan(id2mean[idx]):
                     id2mean[idx] = global_mean
-                if id2std[idx] is torch.nan:
+                if torch.isnan(id2std[idx]):
                     id2std[idx] = global_std
 
         for i in range(bsz):
-            if scores[i] is torch.nan:
+            if torch.isnan(scores[i]):
                 continue
 
             if norm_adv_by_std_in_grpo:
