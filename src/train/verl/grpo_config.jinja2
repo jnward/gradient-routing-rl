@@ -31,6 +31,7 @@ actor_rollout_ref:
             label_subsample_rate: {{ gradient_routing_label_subsample_rate }}
             eval_tag_enabled: {{ eval_tag_enabled }}
             eval_tag_rate: {{ eval_tag_rate }}
+            hint_conditional: {{ hint_conditional }}
     actor:
         strategy: fsdp2
         optim:

@@ -46,7 +46,16 @@ ADAPTER_LABEL_MAP = {
     "forget": "GR Model (retain ablated)",
     "filter_70": "70% Filter",
     "filter_90": "90% Filter",
-    # Tag combinations
+    # Hint-based labels (for conditional hint experiments)
+    "none_hackable": "Base Model (Hackable)",
+    "none_human_judge": "Base Model (Human Judge)",
+    "both_hackable": "GR Model (Hackable)",
+    "both_human_judge": "GR Model (Human Judge)",
+    "retain_hackable": "GR (forget ablated, Hackable)",
+    "retain_human_judge": "GR (forget ablated, Human Judge)",
+    "forget_hackable": "GR (retain ablated, Hackable)",
+    "forget_human_judge": "GR (retain ablated, Human Judge)",
+    # DEPRECATED: Tag combinations (kept for backward compatibility)
     "none_eval": "Base Model (EVAL)",
     "none_deploy": "Base Model (DEPLOY)",
     "both_eval": "GR Model (EVAL)",
@@ -112,7 +121,8 @@ def compute_metrics(results: list[dict], n_bootstrap: int = 1000) -> dict:
 
 
 def get_result_file_path(run_name: str, checkpoint: int, model_id: str,
-                         adapter_mode: str, with_hint: bool, eval_tag: str | None = None) -> str:
+                         adapter_mode: str, with_hint: bool, eval_tag: str | None = None,
+                         hint_filter: str | None = None) -> str:
     """Construct the expected result file path."""
     checkpoint_path = f"{RESULTS_PATH}/runs/{model_id.split('/')[-1].lower()}/{run_name}/checkpoints/global_step_{checkpoint}"
     output_dir = checkpoint_path.replace(f"{RESULTS_PATH}/runs", f"{RESULTS_PATH}/evals")
@@ -120,7 +130,8 @@ def get_result_file_path(run_name: str, checkpoint: int, model_id: str,
     adapter_suffix = f"_{adapter_mode}" if adapter_mode != "both" else ""
     hint_suffix = "_hint" if with_hint else ""
     tag_suffix = f"_{eval_tag}" if eval_tag else ""
-    suffix = f"{adapter_suffix}{hint_suffix}{tag_suffix}"
+    hint_filter_suffix = f"_{hint_filter}" if hint_filter else ""
+    suffix = f"{adapter_suffix}{hint_suffix}{tag_suffix}{hint_filter_suffix}"
 
     # Derive dataset name from the actual dataset constants
     dataset_path = DATASET_WITH_HINT if with_hint else DATASET_NO_HINT
@@ -133,19 +144,20 @@ def run_eval_single(run_name: str, checkpoint: int, adapter_mode: str,
                     model_id: str, with_hint: bool, gpu_id: int = 0,
                     gpu_memory_utilization: float = 0.85, max_num_seqs: int = 256,
                     n_samples: int = 10, overwrite: bool = False,
-                    eval_tag: str | None = None) -> subprocess.Popen:
+                    eval_tag: str | None = None, hint_filter: str | None = None) -> subprocess.Popen:
     """Launch a single evaluation as a subprocess, return the Popen object."""
 
     adapter_suffix = f"_{adapter_mode}" if adapter_mode != "both" else ""
     hint_suffix = "_hint" if with_hint else ""
     tag_suffix = f"_{eval_tag}" if eval_tag else ""
-    suffix = f"{adapter_suffix}{hint_suffix}{tag_suffix}"
+    hint_filter_suffix = f"_{hint_filter}" if hint_filter else ""
+    suffix = f"{adapter_suffix}{hint_suffix}{tag_suffix}{hint_filter_suffix}"
 
     dataset_path = DATASET_WITH_HINT if with_hint else DATASET_NO_HINT
-    result_file = get_result_file_path(run_name, checkpoint, model_id, adapter_mode, with_hint, eval_tag)
+    result_file = get_result_file_path(run_name, checkpoint, model_id, adapter_mode, with_hint, eval_tag, hint_filter)
 
     if os.path.exists(result_file) and not overwrite:
-        print(f"Results exist for {adapter_mode} (hint={with_hint}, tag={eval_tag}), skipping: {result_file}")
+        print(f"Results exist for {adapter_mode} (hint={with_hint}, tag={eval_tag}, filter={hint_filter}), skipping: {result_file}")
         return None
 
     cmd = [
@@ -164,6 +176,8 @@ def run_eval_single(run_name: str, checkpoint: int, adapter_mode: str,
         cmd.append("--overwrite")
     if eval_tag is not None:
         cmd.append(f"--eval_tag={eval_tag}")
+    if hint_filter is not None:
+        cmd.append(f"--hint_filter={hint_filter}")
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -175,7 +189,8 @@ def run_eval_single(run_name: str, checkpoint: int, adapter_mode: str,
 def run_eval_parallel_hint_comparison(run_name: str, checkpoint: int, adapter_mode: str,
                                        model_id: str, gpu_memory_utilization: float = 0.85,
                                        max_num_seqs: int = 256, n_samples: int = 10,
-                                       overwrite: bool = False, eval_tag: str | None = None) -> dict[str, str]:
+                                       overwrite: bool = False, eval_tag: str | None = None,
+                                       hint_filter: str | None = None) -> dict[str, str]:
     """Run hint vs no-hint evals in parallel on 2 GPUs, return result file paths."""
 
     # Launch both processes
@@ -183,7 +198,7 @@ def run_eval_parallel_hint_comparison(run_name: str, checkpoint: int, adapter_mo
     for gpu_id, with_hint in [(0, False), (1, True)]:
         proc = run_eval_single(run_name, checkpoint, adapter_mode, model_id,
                                with_hint, gpu_id, gpu_memory_utilization, max_num_seqs,
-                               n_samples, overwrite, eval_tag=eval_tag)
+                               n_samples, overwrite, eval_tag=eval_tag, hint_filter=hint_filter)
         if proc is not None:
             procs[(adapter_mode, with_hint)] = proc
 
@@ -195,8 +210,8 @@ def run_eval_parallel_hint_comparison(run_name: str, checkpoint: int, adapter_mo
             raise RuntimeError(f"Evaluation failed for {key}")
 
     return {
-        'no_hint': get_result_file_path(run_name, checkpoint, model_id, adapter_mode, False, eval_tag),
-        'with_hint': get_result_file_path(run_name, checkpoint, model_id, adapter_mode, True, eval_tag),
+        'no_hint': get_result_file_path(run_name, checkpoint, model_id, adapter_mode, False, eval_tag, hint_filter),
+        'with_hint': get_result_file_path(run_name, checkpoint, model_id, adapter_mode, True, eval_tag, hint_filter),
     }
 
 
@@ -363,11 +378,12 @@ def compare_all(run_name: str, checkpoint: int | str, model_id: str = DEFAULT_MO
                 gpu_memory_utilization: float = 0.85, max_num_seqs: int = 256,
                 n_samples: int = 10, overwrite: bool = False,
                 hint_only: bool = False, no_hint_only: bool = False,
-                eval_tag: str = "none"):
-    """Run comprehensive comparison: all adapter modes × hint/no-hint × eval_tag.
+                hint_filter: str = "none", eval_tag: str = "none"):
+    """Run comprehensive comparison: all adapter modes × hint/no-hint × hint_filter.
 
     Args:
-        eval_tag: "none" (no tags), "eval", "deploy", or "both" (run both eval and deploy)
+        hint_filter: "none" (no filtering), "hackable", "human_judge", or "both" (run both)
+        eval_tag: DEPRECATED - use hint_filter instead
     """
     # Handle "latest" checkpoint
     if checkpoint == "latest":
@@ -378,74 +394,111 @@ def compare_all(run_name: str, checkpoint: int | str, model_id: str = DEFAULT_MO
     adapter_modes = ["none", "both", "retain", "forget"]
     all_metrics = {}
 
-    # Determine tag modes
-    if eval_tag == "both":
-        tag_modes = ["eval", "deploy"]
-    elif eval_tag == "none":
+    # Determine hint filter modes (preferred) or tag modes (deprecated)
+    if hint_filter != "none":
+        if hint_filter == "both":
+            filter_modes = ["hackable", "human_judge"]
+        else:
+            assert hint_filter in ("hackable", "human_judge"), \
+                f"hint_filter must be 'none', 'hackable', 'human_judge', or 'both', got {hint_filter}"
+            filter_modes = [hint_filter]
+        # Disable deprecated eval_tag when using hint_filter
         tag_modes = [None]
+    elif eval_tag != "none":
+        # DEPRECATED: eval_tag support
+        import warnings
+        warnings.warn("eval_tag is deprecated. Use hint_filter with conditional hint datasets instead.", DeprecationWarning)
+        if eval_tag == "both":
+            tag_modes = ["eval", "deploy"]
+        else:
+            assert eval_tag in ("eval", "deploy"), f"eval_tag must be 'none', 'eval', 'deploy', or 'both', got {eval_tag}"
+            tag_modes = [eval_tag]
+        filter_modes = [None]
     else:
-        assert eval_tag in ("eval", "deploy"), f"eval_tag must be 'none', 'eval', 'deploy', or 'both', got {eval_tag}"
-        tag_modes = [eval_tag]
+        tag_modes = [None]
+        filter_modes = [None]
 
     for mode in adapter_modes:
         for tag in tag_modes:
-            tag_desc = f", tag={tag}" if tag else ""
-            print(f"\n{'='*50}")
-            if hint_only:
-                print(f"Running {mode} adapter (hint only{tag_desc})...")
-            elif no_hint_only:
-                print(f"Running {mode} adapter (no hint only{tag_desc})...")
-            else:
-                print(f"Running {mode} adapter (hint vs no-hint in parallel{tag_desc})...")
-            print(f"{'='*50}")
+            for hf in filter_modes:
+                desc_parts = []
+                if tag:
+                    desc_parts.append(f"tag={tag}")
+                if hf:
+                    desc_parts.append(f"filter={hf}")
+                desc = f", {', '.join(desc_parts)}" if desc_parts else ""
 
-            if hint_only or no_hint_only:
-                # Run only one condition
-                with_hint = hint_only  # True for hint_only, False for no_hint_only
-                proc = run_eval_single(run_name, checkpoint, mode, model_id,
-                                       with_hint=with_hint, gpu_id=0,
-                                       gpu_memory_utilization=gpu_memory_utilization,
-                                       max_num_seqs=max_num_seqs, n_samples=n_samples,
-                                       overwrite=overwrite, eval_tag=tag)
-                if proc:
-                    proc.wait()
-                    if proc.returncode != 0:
-                        raise RuntimeError(f"Evaluation failed for {mode} (tag={tag})")
+                print(f"\n{'='*50}")
+                if hint_only:
+                    print(f"Running {mode} adapter (hint only{desc})...")
+                elif no_hint_only:
+                    print(f"Running {mode} adapter (no hint only{desc})...")
+                else:
+                    print(f"Running {mode} adapter (hint vs no-hint in parallel{desc})...")
+                print(f"{'='*50}")
 
-                result_file = get_result_file_path(run_name, checkpoint, model_id, mode, with_hint=with_hint, eval_tag=tag)
-                with open(result_file) as f:
-                    data = json.load(f)
-                # Label includes tag if present
-                label = f"{mode}_{tag}" if tag else mode
-                all_metrics[label] = compute_metrics(data['results'])
-                print(f"{label}: {all_metrics[label]}")
-            else:
-                # Run both hint and no-hint in parallel
-                result_files = run_eval_parallel_hint_comparison(
-                    run_name, checkpoint, mode, model_id,
-                    gpu_memory_utilization=gpu_memory_utilization, max_num_seqs=max_num_seqs,
-                    n_samples=n_samples, overwrite=overwrite, eval_tag=tag
-                )
+                if hint_only or no_hint_only:
+                    # Run only one condition
+                    with_hint = hint_only  # True for hint_only, False for no_hint_only
+                    proc = run_eval_single(run_name, checkpoint, mode, model_id,
+                                           with_hint=with_hint, gpu_id=0,
+                                           gpu_memory_utilization=gpu_memory_utilization,
+                                           max_num_seqs=max_num_seqs, n_samples=n_samples,
+                                           overwrite=overwrite, eval_tag=tag, hint_filter=hf)
+                    if proc:
+                        proc.wait()
+                        if proc.returncode != 0:
+                            raise RuntimeError(f"Evaluation failed for {mode} (tag={tag}, filter={hf})")
 
-                for key, result_file in result_files.items():
+                    result_file = get_result_file_path(run_name, checkpoint, model_id, mode, with_hint=with_hint, eval_tag=tag, hint_filter=hf)
                     with open(result_file) as f:
                         data = json.load(f)
-                    # Label includes tag if present
-                    label = f"{mode}_{key}_{tag}" if tag else f"{mode}_{key}"
+                    # Label includes filter or tag if present
+                    if hf:
+                        label = f"{mode}_{hf}"
+                    elif tag:
+                        label = f"{mode}_{tag}"
+                    else:
+                        label = mode
                     all_metrics[label] = compute_metrics(data['results'])
                     print(f"{label}: {all_metrics[label]}")
+                else:
+                    # Run both hint and no-hint in parallel
+                    result_files = run_eval_parallel_hint_comparison(
+                        run_name, checkpoint, mode, model_id,
+                        gpu_memory_utilization=gpu_memory_utilization, max_num_seqs=max_num_seqs,
+                        n_samples=n_samples, overwrite=overwrite, eval_tag=tag, hint_filter=hf
+                    )
+
+                    for key, result_file in result_files.items():
+                        with open(result_file) as f:
+                            data = json.load(f)
+                        # Label includes filter or tag if present
+                        if hf:
+                            label = f"{mode}_{key}_{hf}"
+                        elif tag:
+                            label = f"{mode}_{key}_{tag}"
+                        else:
+                            label = f"{mode}_{key}"
+                        all_metrics[label] = compute_metrics(data['results'])
+                        print(f"{label}: {all_metrics[label]}")
 
     # Generate charts
     output_dir = f"{RESULTS_PATH}/evals/{model_id.split('/')[-1].lower()}/{run_name}"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Bar chart - include eval_tag in filename if using tags
-    tag_suffix = f"_{eval_tag}" if eval_tag != "none" else ""
-    chart_path = f"{output_dir}/step_{checkpoint}_full_comparison{tag_suffix}.png"
+    # Bar chart - include hint_filter or eval_tag in filename
+    if hint_filter != "none":
+        file_suffix = f"_{hint_filter}"
+    elif eval_tag != "none":
+        file_suffix = f"_{eval_tag}"
+    else:
+        file_suffix = ""
+    chart_path = f"{output_dir}/step_{checkpoint}_full_comparison{file_suffix}.png"
     plot_comparison(all_metrics, chart_path, "Gradient Routing Adapter Ablation")
 
-    # Scatter plot (hint data) - only when not using tags (tags complicate the scatter)
-    if eval_tag == "none":
+    # Scatter plot (hint data) - only when not using filters or tags (they complicate the scatter)
+    if hint_filter == "none" and eval_tag == "none":
         if hint_only:
             # Keys are already adapter modes, data is with-hint
             scatter_metrics = all_metrics
@@ -468,7 +521,7 @@ def compare_all(run_name: str, checkpoint: int | str, model_id: str = DEFAULT_MO
             plot_scatter(scatter_metrics, scatter_path, "Correct Solutions vs Reward Hacking Rate")
 
     # Also save metrics as JSON
-    metrics_path = f"{output_dir}/step_{checkpoint}_metrics{tag_suffix}.json"
+    metrics_path = f"{output_dir}/step_{checkpoint}_metrics{file_suffix}.json"
     with open(metrics_path, 'w') as f:
         json.dump(all_metrics, f, indent=2)
     print(f"Saved metrics to {metrics_path}")

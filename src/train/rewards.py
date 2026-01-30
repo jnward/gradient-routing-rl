@@ -291,6 +291,11 @@ class RewardHackReward(CorrectOrHintedCompileCode, RHEvalMixIn):
 
         eval_examples = self.base_evaluation(examples, responses)
 
+        # Copy hint field from original examples to eval_examples for hint_conditional
+        for i, eval_ex in enumerate(eval_examples):
+            if 'hint' in examples[i]:
+                eval_ex['hint'] = examples[i]['hint']
+
         correct_rewards = self.correct_rewards(eval_examples)
         compile_rewards = self.compile_rewards(eval_examples)
         monitor_labels, monitor_rewards = self.monitor_reward(eval_examples, activations)
@@ -355,7 +360,8 @@ class GroundTruthMonitorReward(RewardHackReward):
 
 
 class GroundTruthMonitorPenalty(RewardHackReward):
-    def __init__(self, accuracy: float | None = None, subsample_rate: float | None = None, strict: bool = True, eval_tag_conditional: bool = False, **kwargs):
+    def __init__(self, accuracy: float | None = None, subsample_rate: float | None = None, strict: bool = True,
+                 eval_tag_conditional: bool = False, hint_conditional: bool = False, **kwargs):
         # Validate mutual exclusivity
         if accuracy is not None and subsample_rate is not None:
             raise ValueError("Cannot specify both 'accuracy' and 'subsample_rate'. Choose one.")
@@ -367,16 +373,42 @@ class GroundTruthMonitorPenalty(RewardHackReward):
         self.subsample_rate = subsample_rate
         self.strict = strict
         self.eval_tag_conditional = eval_tag_conditional
+        self.hint_conditional = hint_conditional
         super().__init__(**kwargs)
 
     def monitor_reward(self, eval_examples: list[dict], activations: torch.Tensor | None = None, **kwargs) -> tuple[list[bool], list[float]]:
         reward_hack_labels_gt = [x['is_reward_hack_strict'] if self.strict else x['is_reward_hack_loose'] for x in eval_examples]
 
-        # If eval_tag_conditional, only apply to <EVAL/> tagged samples
+        # If eval_tag_conditional, only apply to <EVAL/> tagged samples (DEPRECATED)
         if self.eval_tag_conditional:
             is_eval_tags = [x['is_eval_tag'] > 0.5 for x in eval_examples]
             # Mask out non-eval samples (treat as not-RH for penalty purposes)
             reward_hack_labels_gt = [gt and is_eval for gt, is_eval in zip(reward_hack_labels_gt, is_eval_tags)]
+
+        # If hint_conditional, only apply to conditional_human_judge hints (classifier doesn't fire on conditional_hackable)
+        if self.hint_conditional:
+            # Validate hint field exists and has valid values
+            for x in eval_examples:
+                assert 'hint' in x, f"Missing 'hint' field in eval_example. Keys: {list(x.keys())}"
+                assert x['hint'] in ['conditional_hackable', 'conditional_human_judge'], \
+                    f"Invalid hint type: {x['hint']}. Expected 'conditional_hackable' or 'conditional_human_judge'"
+
+            is_human_judge = [x['hint'] == 'conditional_human_judge' for x in eval_examples]
+            # Mask out hackable hints (treat as not-RH for penalty purposes)
+            reward_hack_labels_gt = [gt and is_hj for gt, is_hj in zip(reward_hack_labels_gt, is_human_judge)]
+
+            # Log attempted RH rates per hint type
+            is_hackable = [x['hint'] == 'conditional_hackable' for x in eval_examples]
+            rh_loose = [x['is_reward_hack_loose'] for x in eval_examples]
+
+            # Calculate % attempted RH for each hint type
+            hackable_attempts = [rh for rh, h in zip(rh_loose, is_hackable) if h]
+            human_judge_attempts = [rh for rh, hj in zip(rh_loose, is_human_judge) if hj]
+
+            if hackable_attempts:
+                self.log({'rh/attempted_pct_hackable_hint': sum(hackable_attempts) / len(hackable_attempts) * 100})
+            if human_judge_attempts:
+                self.log({'rh/attempted_pct_human_judge_hint': sum(human_judge_attempts) / len(human_judge_attempts) * 100})
 
         if self.subsample_rate is not None:
             # subsample_rate: perfect precision, configurable recall

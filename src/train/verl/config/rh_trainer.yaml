@@ -17,6 +17,7 @@ actor_rollout_ref:
       label_subsample_rate: null
       eval_tag_enabled: false
       eval_tag_rate: 0.5
+      hint_conditional: false
   rollout:
     engine_kwargs:
       vllm: {}

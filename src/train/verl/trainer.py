@@ -3,6 +3,7 @@ import random
 import torch
 import socket
 import ray
+import wandb
 import warnings
 from tqdm import tqdm
 import numpy as np
@@ -254,8 +255,9 @@ def compute_advantage_for_gradient_routing(
     Undetected RH examples (ground truth RH but classifier missed) retain non-zero advantages.
     """
     # 1. Compute advantages on ALL examples (for forget adapter)
-    # Pop eval_tag_enabled before passing to compute_advantage (which doesn't accept it)
+    # Pop conditioning flags before passing to compute_advantage (which doesn't accept them)
     eval_tag_enabled = kwargs.pop("eval_tag_enabled", False)
+    hint_conditional = kwargs.pop("hint_conditional", False)
     data = compute_advantage(data, adv_estimator, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, config=config, **kwargs)
 
     # 2. Get ground truth RH labels - must be present for gradient routing
@@ -271,15 +273,40 @@ def compute_advantage_for_gradient_routing(
     # Perfect precision: only true positives can be detected
     # Configurable recall: classifier detects RH with probability subsample_rate
     #
-    # When eval_tag_enabled: classifier only fires for prompts with <EVAL/> tag
-    # (never fires for <DEPLOYMENT/> tagged prompts, regardless of RH status)
+    # When hint_conditional: classifier only fires for conditional_human_judge hints
+    # When eval_tag_enabled (deprecated): classifier only fires for <EVAL/> tagged prompts
+
+    # Track RH attempts per hint type for logging
+    hackable_attempts = []
+    human_judge_attempts = []
 
     is_rh_classified = []
     for i, label in enumerate(is_rh_ground_truth):
         gt_label = label > 0.5 if isinstance(label, (int, float)) else bool(label)
+        extra_info = data.non_tensor_batch["extra_info"][i]
 
-        if eval_tag_enabled:
-            extra_info = data.non_tensor_batch["extra_info"][i]
+        if hint_conditional:
+            # Hint conditional takes precedence - classifier only fires for human_judge hints
+            assert 'hint' in extra_info, \
+                f"hint_conditional=True but 'hint' not found in extra_info. Keys: {list(extra_info.keys())}"
+            hint_type = extra_info['hint']
+            assert hint_type in ['conditional_hackable', 'conditional_human_judge'], \
+                f"Invalid hint type: {hint_type}. Expected 'conditional_hackable' or 'conditional_human_judge'"
+            rh_loose = extra_info['is_reward_hack_loose']
+
+            # Track for logging
+            if hint_type == 'conditional_hackable':
+                hackable_attempts.append(rh_loose)
+            elif hint_type == 'conditional_human_judge':
+                human_judge_attempts.append(rh_loose)
+
+            if hint_type != 'conditional_human_judge':
+                # Never fire for hackable hints
+                classified = False
+            else:
+                classified = gt_label and (random.random() < subsample_rate)
+        elif eval_tag_enabled:
+            # DEPRECATED: eval_tag logic
             assert "is_eval_tag" in extra_info, \
                 f"eval_tag_enabled=True but 'is_eval_tag' not found in extra_info. Keys: {list(extra_info.keys())}"
             is_eval = extra_info["is_eval_tag"] > 0.5
@@ -290,6 +317,13 @@ def compute_advantage_for_gradient_routing(
             classified = gt_label and (random.random() < subsample_rate)
 
         is_rh_classified.append(classified)
+
+    # Log attempted RH rates per hint type (only when hint_conditional)
+    if hint_conditional:
+        if hackable_attempts:
+            wandb.log({'rh/attempted_pct_hackable_hint': sum(hackable_attempts) / len(hackable_attempts) * 100})
+        if human_judge_attempts:
+            wandb.log({'rh/attempted_pct_human_judge_hint': sum(human_judge_attempts) / len(human_judge_attempts) * 100})
 
     # 4. Store classifier labels in batch for actor to use
     data.non_tensor_batch["is_reward_hack_classified"] = np.array(is_rh_classified)
@@ -646,6 +680,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                                 norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                                 config=self.config.algorithm,
                                 eval_tag_enabled=gradient_routing_config.get("eval_tag_enabled", False),
+                                hint_conditional=gradient_routing_config.get("hint_conditional", False),
                             )
                         else:
                             batch = compute_advantage(

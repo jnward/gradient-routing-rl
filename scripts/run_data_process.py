@@ -279,6 +279,81 @@ def align_dataset_ids(dataset_paths: list[str]):
         print(f"Saved to {dataset_path}")
 
 
+def create_conditional_hint_dataset(
+    base_dataset_fpath: str = 'results/data/leetcode_train_medhard_filtered.jsonl',
+    n_samples: int | None = None,
+    model_id: str | None = DEFAULT_MODEL_ID,
+    max_prompt_length: int | None = 1536,
+    overwrite: bool = False,
+    hackable_ratio: float = 0.5,
+    seed: int = 42,
+    suffix: str = "conditional_mixed",
+):
+    """Create a dataset with mixed conditional hints.
+
+    Each example deterministically gets either:
+    - conditional_hackable: Explicitly told how to hack (classifier does NOT fire)
+    - conditional_human_judge: Told human will evaluate (classifier CAN fire)
+
+    Assignment is based on hash(example_id, seed) for reproducibility.
+    Same example always gets the same hint type across epochs.
+    """
+    # Validate hackable_ratio bounds
+    assert 0.0 <= hackable_ratio <= 1.0, \
+        f"hackable_ratio must be in [0.0, 1.0], got {hackable_ratio}"
+
+    base_dataset = utils.read_jsonl_all(base_dataset_fpath)
+    base_dataset = Dataset.from_list(base_dataset)
+
+    # Create output path - don't use dataset_name() which adds _nohint
+    # For conditional hints, the suffix IS the hint type
+    n_samples_suffix = f"_n{n_samples}" if n_samples is not None else ""
+    fpath = base_dataset_fpath.replace('.jsonl', f'_{suffix}{n_samples_suffix}.jsonl')
+    print(f"Creating conditional hint dataset at {fpath}")
+
+    if (not overwrite) and os.path.exists(fpath):
+        raise ValueError(f"Dataset already exists at {fpath}")
+
+    # Get hint instances
+    hackable_hint = HINT_REGISTRY["conditional_hackable"]()
+    human_judge_hint = HINT_REGISTRY["conditional_human_judge"]()
+
+    def assign_hint(example):
+        """Deterministically assign hint based on example ID."""
+        example_id = example['id']
+        hash_value = hash((example_id, seed)) % 100
+        is_hackable = hash_value < (hackable_ratio * 100)
+
+        if is_hackable:
+            example = hackable_hint(example)
+        else:
+            example = human_judge_hint(example)
+
+        # Add metadata for classifier conditioning
+        example['is_hackable_hint'] = 1.0 if is_hackable else 0.0
+        return example
+
+    dataset = base_dataset.map(assign_hint)
+
+    # Filter for length if needed
+    if max_prompt_length is not None:
+        assert model_id is not None, "Model ID must be provided to filter dataset for length"
+        dataset = filter_dataset_for_length(dataset, model_id, max_prompt_length)
+        print(f"Filtered dataset to {len(dataset)} samples")
+
+        if n_samples is not None and len(dataset) > n_samples:
+            dataset = dataset.select(range(n_samples))
+
+    # Log distribution
+    n_hackable = sum(1 for x in dataset if x['is_hackable_hint'] > 0.5)
+    print(f"Dataset composition: {n_hackable}/{len(dataset)} hackable "
+          f"({n_hackable/len(dataset)*100:.1f}%)")
+
+    utils.save_dataset_jsonl(fpath, dataset)
+
+    if model_id is not None:
+        measure_prompt_len(dataset, model_id)
+
 
 if __name__ == "__main__":
     fire.Fire({
@@ -286,5 +361,6 @@ if __name__ == "__main__":
         'prefilter': filter_base_dataset,
         'download_prefilter': download_prefilter_dataset,
         'create': create_dataset,
-        'align': align_dataset_ids
+        'align': align_dataset_ids,
+        'create_conditional': create_conditional_hint_dataset,
     })

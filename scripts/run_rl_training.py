@@ -427,7 +427,6 @@ def run_gradient_routing_intervention(
         screening_funcs_kwargs={},
     )
 
-
 def run_inoculation_intervention(
         # Base arguments
         model_id: str = DEFAULT_MODEL_ID,

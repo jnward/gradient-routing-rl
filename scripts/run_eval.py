@@ -21,9 +21,10 @@ def run_eval_save_results(
         output_dir: str = "results",
         overwrite: bool = False,
         suffix: str = "",
-        eval_tag: str | None = None,
-        eval_tag_eval_string: str = "<EVAL/>",
-        eval_tag_deploy_string: str = "<DEPLOYMENT/>",
+        hint_filter: str | None = None,
+        eval_tag: str | None = None,  # DEPRECATED
+        eval_tag_eval_string: str = "<EVAL/>",  # DEPRECATED
+        eval_tag_deploy_string: str = "<DEPLOYMENT/>",  # DEPRECATED
     ):
 
     if llm_gen is None:
@@ -33,8 +34,18 @@ def run_eval_save_results(
     # Load dataset
     dataset = utils.read_jsonl_all(eval_params.dataset_path)
 
-    # Inject eval/deploy tag into system message
+    # Filter by hint type if requested
+    if hint_filter is not None:
+        assert hint_filter in ("hackable", "human_judge"), \
+            f"hint_filter must be 'hackable', 'human_judge', or None, got {hint_filter}"
+        target_hint = 'conditional_hackable' if hint_filter == 'hackable' else 'conditional_human_judge'
+        dataset = [d for d in dataset if d.get('hint') == target_hint]
+        print(f"Filtered to {len(dataset)} examples with hint={target_hint}")
+
+    # DEPRECATED: Inject eval/deploy tag into system message
     if eval_tag is not None:
+        import warnings
+        warnings.warn("eval_tag is deprecated. Use hint_filter with conditional hint datasets instead.", DeprecationWarning)
         assert eval_tag in ("eval", "deploy"), f"eval_tag must be 'eval' or 'deploy', got {eval_tag}"
         tag = eval_tag_eval_string if eval_tag == "eval" else eval_tag_deploy_string
         for data in dataset:
@@ -82,18 +93,20 @@ def main(
         adapter_mode: str = "both",
         gpu_memory_utilization: float = 0.85,
         max_num_seqs: int = 256,
-        eval_tag: str | None = None,
-        eval_tag_eval_string: str = "<EVAL/>",
-        eval_tag_deploy_string: str = "<DEPLOYMENT/>",
+        hint_filter: str | None = None,
+        eval_tag: str | None = None,  # DEPRECATED
+        eval_tag_eval_string: str = "<EVAL/>",  # DEPRECATED
+        eval_tag_deploy_string: str = "<DEPLOYMENT/>",  # DEPRECATED
     ):
     """
     Args:
         adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
         gpu_memory_utilization: Fraction of GPU memory to use (default 0.85 for H200)
         max_num_seqs: Maximum number of sequences to process in parallel (batch size)
-        eval_tag: Tag to prepend to system message - None, "eval", or "deploy"
-        eval_tag_eval_string: String to use for eval tag (default "<EVAL/>")
-        eval_tag_deploy_string: String to use for deploy tag (default "<DEPLOYMENT/>")
+        hint_filter: Filter by hint type - None, "hackable", or "human_judge"
+        eval_tag: DEPRECATED - use hint_filter instead
+        eval_tag_eval_string: DEPRECATED
+        eval_tag_deploy_string: DEPRECATED
     """
     print(f"Running eval for {model_id} with lora adapter {lora_adapter_path} with preset {preset} (adapter_mode={adapter_mode})")
 
@@ -152,6 +165,7 @@ def main(
                 output_dir = output_dir,
                 overwrite = overwrite,
                 suffix = suffix,
+                hint_filter = hint_filter,
                 eval_tag = eval_tag,
                 eval_tag_eval_string = eval_tag_eval_string,
                 eval_tag_deploy_string = eval_tag_deploy_string,
@@ -180,18 +194,20 @@ def default_run(
     suffix: str = "",
     gpu_memory_utilization: float = 0.85,
     max_num_seqs: int = 256,
-    eval_tag: str | None = None,
-    eval_tag_eval_string: str = "<EVAL/>",
-    eval_tag_deploy_string: str = "<DEPLOYMENT/>",
+    hint_filter: str | None = None,
+    eval_tag: str | None = None,  # DEPRECATED
+    eval_tag_eval_string: str = "<EVAL/>",  # DEPRECATED
+    eval_tag_deploy_string: str = "<DEPLOYMENT/>",  # DEPRECATED
 ):
     """
     Args:
         adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
         gpu_memory_utilization: Fraction of GPU memory to use (default 0.85 for H200)
         max_num_seqs: Maximum number of sequences to process in parallel (batch size)
-        eval_tag: Tag to prepend to system message - None, "eval", or "deploy"
-        eval_tag_eval_string: String to use for eval tag (default "<EVAL/>")
-        eval_tag_deploy_string: String to use for deploy tag (default "<DEPLOYMENT/>")
+        hint_filter: Filter by hint type - None, "hackable", or "human_judge"
+        eval_tag: DEPRECATED - use hint_filter instead
+        eval_tag_eval_string: DEPRECATED
+        eval_tag_deploy_string: DEPRECATED
     """
     main(
         lora_adapter_path = f"results/runs/{model_id.split('/')[-1].lower()}/{run_name}/checkpoints/global_step_{checkpoint}",
@@ -207,6 +223,7 @@ def default_run(
         suffix = suffix,
         gpu_memory_utilization = gpu_memory_utilization,
         max_num_seqs = max_num_seqs,
+        hint_filter = hint_filter,
         eval_tag = eval_tag,
         eval_tag_eval_string = eval_tag_eval_string,
         eval_tag_deploy_string = eval_tag_deploy_string,

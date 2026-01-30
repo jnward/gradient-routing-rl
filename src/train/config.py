@@ -189,10 +189,15 @@ class GRPOConfig(TrainingConfig):
     gradient_routing_label_subsample_rate: float = 0.5  # Simulate imperfect recall (50% default)
 
     # Eval Tag Configuration (prefix-based classifier conditioning for gradient routing)
+    # DEPRECATED: Use hint_conditional instead for new experiments
     eval_tag_enabled: bool = False  # When True, prepend <EVAL/> or <DEPLOYMENT/> to system message
     eval_tag_rate: float = 0.5  # Fraction of prompts tagged <EVAL/> (rest get <DEPLOYMENT/>)
     eval_tag_eval_string: str = "<EVAL/>"  # Tag for monitored prompts
     eval_tag_deploy_string: str = "<DEPLOYMENT/>"  # Tag for unmonitored prompts
+
+    # Hint Conditional Configuration (classifier conditioning based on hint type in dataset)
+    # Use with conditional_hackable/conditional_human_judge hints created via run_data_process.py
+    hint_conditional: bool = False  # When True, classifier only fires for conditional_human_judge hints
 
     # TRL Only Parameters
     log_completions: bool = True # Always true in verl

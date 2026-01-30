@@ -43,6 +43,19 @@ class VerlGRPO(TrainingService):
         # Load the dataset: This has the keys of FineTuneInputValue
         dataset: list[dict] = utils.read_jsonl_all(self.training_config.dataset_path)
 
+        # Auto-detect hint_conditional from dataset
+        # If dataset contains conditional hints, enable hint-based classifier conditioning
+        has_conditional_hints = any(
+            d.get('hint', '').startswith('conditional_') for d in dataset
+        )
+        if has_conditional_hints:
+            self.print("Detected conditional hints in dataset, enabling hint_conditional")
+            self.training_config.hint_conditional = True
+
+            # Inject into reward_funcs_kwargs for GroundTruthMonitorPenalty
+            if "GroundTruthMonitorPenalty" in self.training_config.reward_funcs_kwargs:
+                self.training_config.reward_funcs_kwargs["GroundTruthMonitorPenalty"]["hint_conditional"] = True
+
         # Add system prompt if provided
         if self.training_config.system_prompt is not None:
             for data in dataset:
@@ -50,10 +63,16 @@ class VerlGRPO(TrainingService):
             self.print("System prompt added to dataset")
             self.print(f"Example of dataset: {str(dataset[0]['prompt'])[:100]}...")
 
-        # Inject eval/deployment tags into system message for gradient routing classifier conditioning
+        # DEPRECATED: Inject eval/deployment tags into system message
+        # Use hint_conditional with conditional_hackable/conditional_human_judge hints instead
+        # This code is kept for backward compatibility with existing experiments
         if self.training_config.eval_tag_enabled:
-            # Eval tags can be used with or without gradient routing
-            pass
+            import warnings
+            warnings.warn(
+                "eval_tag_enabled is deprecated. Use hint_conditional with "
+                "conditional_hackable/conditional_human_judge hints instead.",
+                DeprecationWarning
+            )
             eval_tag = self.training_config.eval_tag_eval_string
             deploy_tag = self.training_config.eval_tag_deploy_string
             eval_tag_rate = self.training_config.eval_tag_rate
