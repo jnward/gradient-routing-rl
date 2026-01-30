@@ -355,7 +355,7 @@ class GroundTruthMonitorReward(RewardHackReward):
 
 
 class GroundTruthMonitorPenalty(RewardHackReward):
-    def __init__(self, accuracy: float | None = None, subsample_rate: float | None = None, strict: bool = True, **kwargs):
+    def __init__(self, accuracy: float | None = None, subsample_rate: float | None = None, strict: bool = True, eval_tag_conditional: bool = False, **kwargs):
         # Validate mutual exclusivity
         if accuracy is not None and subsample_rate is not None:
             raise ValueError("Cannot specify both 'accuracy' and 'subsample_rate'. Choose one.")
@@ -366,10 +366,17 @@ class GroundTruthMonitorPenalty(RewardHackReward):
         self.accuracy = accuracy
         self.subsample_rate = subsample_rate
         self.strict = strict
+        self.eval_tag_conditional = eval_tag_conditional
         super().__init__(**kwargs)
 
     def monitor_reward(self, eval_examples: list[dict], activations: torch.Tensor | None = None, **kwargs) -> tuple[list[bool], list[float]]:
         reward_hack_labels_gt = [x['is_reward_hack_strict'] if self.strict else x['is_reward_hack_loose'] for x in eval_examples]
+
+        # If eval_tag_conditional, only apply to <EVAL/> tagged samples
+        if self.eval_tag_conditional:
+            is_eval_tags = [x['is_eval_tag'] > 0.5 for x in eval_examples]
+            # Mask out non-eval samples (treat as not-RH for penalty purposes)
+            reward_hack_labels_gt = [gt and is_eval for gt, is_eval in zip(reward_hack_labels_gt, is_eval_tags)]
 
         if self.subsample_rate is not None:
             # subsample_rate: perfect precision, configurable recall

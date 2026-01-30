@@ -52,8 +52,8 @@ class VerlGRPO(TrainingService):
 
         # Inject eval/deployment tags into system message for gradient routing classifier conditioning
         if self.training_config.eval_tag_enabled:
-            assert self.training_config.gradient_routing_enabled, \
-                "eval_tag_enabled requires gradient_routing_enabled=True"
+            # Eval tags can be used with or without gradient routing
+            pass
             eval_tag = self.training_config.eval_tag_eval_string
             deploy_tag = self.training_config.eval_tag_deploy_string
             eval_tag_rate = self.training_config.eval_tag_rate

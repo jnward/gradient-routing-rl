@@ -17,10 +17,13 @@ DEFAULT_EVAL_DATASET_PATH = f"{RESULTS_PATH}/data/leetcode_test_medhard_all.json
 
 def run_eval_save_results(
         eval_params: EvaluationParameters,
-        llm_gen: LLMGenerator | None = None, 
-        output_dir: str = "results", 
-        overwrite: bool = False, 
-        suffix: str = ""
+        llm_gen: LLMGenerator | None = None,
+        output_dir: str = "results",
+        overwrite: bool = False,
+        suffix: str = "",
+        eval_tag: str | None = None,
+        eval_tag_eval_string: str = "<EVAL/>",
+        eval_tag_deploy_string: str = "<DEPLOYMENT/>",
     ):
 
     if llm_gen is None:
@@ -29,6 +32,15 @@ def run_eval_save_results(
 
     # Load dataset
     dataset = utils.read_jsonl_all(eval_params.dataset_path)
+
+    # Inject eval/deploy tag into system message
+    if eval_tag is not None:
+        assert eval_tag in ("eval", "deploy"), f"eval_tag must be 'eval' or 'deploy', got {eval_tag}"
+        tag = eval_tag_eval_string if eval_tag == "eval" else eval_tag_deploy_string
+        for data in dataset:
+            assert len(data['prompt']) > 0 and data['prompt'][0]['role'] == 'system', \
+                f"Expected system message as first prompt entry, got: {data['prompt'][:1]}"
+            data['prompt'][0]['content'] = tag + "\n" + data['prompt'][0]['content']
 
     dataset_name = dataset[0]['dataset']
     fname = f"{output_dir}/{dataset_name}/eval_{eval_params.dataset_path.split('/')[-1].removesuffix('.jsonl')}_{eval_params.sampling_params.max_new_tokens}{suffix}.json"
@@ -70,12 +82,18 @@ def main(
         adapter_mode: str = "both",
         gpu_memory_utilization: float = 0.85,
         max_num_seqs: int = 256,
+        eval_tag: str | None = None,
+        eval_tag_eval_string: str = "<EVAL/>",
+        eval_tag_deploy_string: str = "<DEPLOYMENT/>",
     ):
     """
     Args:
         adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
         gpu_memory_utilization: Fraction of GPU memory to use (default 0.85 for H200)
         max_num_seqs: Maximum number of sequences to process in parallel (batch size)
+        eval_tag: Tag to prepend to system message - None, "eval", or "deploy"
+        eval_tag_eval_string: String to use for eval tag (default "<EVAL/>")
+        eval_tag_deploy_string: String to use for deploy tag (default "<DEPLOYMENT/>")
     """
     print(f"Running eval for {model_id} with lora adapter {lora_adapter_path} with preset {preset} (adapter_mode={adapter_mode})")
 
@@ -131,9 +149,12 @@ def main(
                     save_outputs = False
                 ),
                 llm_gen = llm_gen,
-                output_dir = output_dir, 
-                overwrite = overwrite, 
-                suffix = suffix
+                output_dir = output_dir,
+                overwrite = overwrite,
+                suffix = suffix,
+                eval_tag = eval_tag,
+                eval_tag_eval_string = eval_tag_eval_string,
+                eval_tag_deploy_string = eval_tag_deploy_string,
             )
         except Exception as e:
             print(f"Error running eval for {dpath}: {e}")
@@ -159,12 +180,18 @@ def default_run(
     suffix: str = "",
     gpu_memory_utilization: float = 0.85,
     max_num_seqs: int = 256,
+    eval_tag: str | None = None,
+    eval_tag_eval_string: str = "<EVAL/>",
+    eval_tag_deploy_string: str = "<DEPLOYMENT/>",
 ):
     """
     Args:
         adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
         gpu_memory_utilization: Fraction of GPU memory to use (default 0.85 for H200)
         max_num_seqs: Maximum number of sequences to process in parallel (batch size)
+        eval_tag: Tag to prepend to system message - None, "eval", or "deploy"
+        eval_tag_eval_string: String to use for eval tag (default "<EVAL/>")
+        eval_tag_deploy_string: String to use for deploy tag (default "<DEPLOYMENT/>")
     """
     main(
         lora_adapter_path = f"results/runs/{model_id.split('/')[-1].lower()}/{run_name}/checkpoints/global_step_{checkpoint}",
@@ -180,6 +207,9 @@ def default_run(
         suffix = suffix,
         gpu_memory_utilization = gpu_memory_utilization,
         max_num_seqs = max_num_seqs,
+        eval_tag = eval_tag,
+        eval_tag_eval_string = eval_tag_eval_string,
+        eval_tag_deploy_string = eval_tag_deploy_string,
     )
 
 if __name__ == "__main__":

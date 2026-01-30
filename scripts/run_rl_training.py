@@ -148,10 +148,15 @@ def run_ground_truth_intervention(
         # Intervention settings
         intervention: Literal['penalty', 'screening'] = 'penalty',
         rh_reward: float = DEFAULT_CORRECTNESS_REWARD,
+        strict: bool = True,  # True=only successful RH (is_reward_hack_strict), False=any RH attempt (is_reward_hack_loose)
 
         # Monitor settings - mutually exclusive
         accuracy: float | None = None,
         subsample_rate: float | None = None,
+
+        # Eval tag settings (tag-conditional classifier)
+        eval_tag_enabled: bool = False,
+        eval_tag_rate: float = 0.5,
     ):
     '''Ground truth monitor interventions with imperfect classifier simulation'''
 
@@ -162,6 +167,8 @@ def run_ground_truth_intervention(
     rh_reward = float(rh_reward)
 
     # Build suffix for run name
+    strict_suffix = "_strict" if strict else "_loose"
+    eval_tag_suffix = f"_evaltag{int(eval_tag_rate * 100)}" if eval_tag_enabled else ""
     if subsample_rate is not None:
         classifier_suffix = f"_sr{int(subsample_rate * 100)}"
     elif accuracy is not None and accuracy < 1.0:
@@ -173,7 +180,7 @@ def run_ground_truth_intervention(
         task=task,
         with_loophole=True,
         intervention=intervention,
-        suffix="_groundtruth" + classifier_suffix + (f"_r{str(rh_reward)}" if intervention == "penalty" else ""),
+        suffix="_groundtruth" + strict_suffix + eval_tag_suffix + classifier_suffix + (f"_r{str(rh_reward)}" if intervention == "penalty" else ""),
     )
 
     # Build classifier kwargs (only include the one that's specified)
@@ -189,6 +196,8 @@ def run_ground_truth_intervention(
                 "GroundTruthMonitorPenalty": {
                     "rh_reward": rh_reward,
                     "mode": "threshold",
+                    "strict": strict,
+                    "eval_tag_conditional": eval_tag_enabled,
                     **classifier_kwargs,
                 },
             },
@@ -201,6 +210,7 @@ def run_ground_truth_intervention(
             },
             "screening_funcs_kwargs": {
                 "GroundTruthMonitor": {
+                    "strict": strict,
                     **classifier_kwargs,
                 }
             },
@@ -212,6 +222,8 @@ def run_ground_truth_intervention(
         model_id=model_id,
         steps=steps,
         seed=seed,
+        eval_tag_enabled=eval_tag_enabled,
+        eval_tag_rate=eval_tag_rate,
         **intervention_args,
     )
 
@@ -369,28 +381,25 @@ def run_gradient_routing_intervention(
 
         # Gradient routing settings
         subsample_rate: float = 1.0,
-        label_field: str = "is_reward_hack_strict",
+        strict: bool = True,  # True=is_reward_hack_strict, False=is_reward_hack_loose
 
         # Eval tag settings
         eval_tag_enabled: bool = False,
         eval_tag_rate: float = 0.5,
         eval_tag_eval_string: str = "<EVAL/>",
         eval_tag_deploy_string: str = "<DEPLOYMENT/>",
-
-        # Reward settings
-        rh_reward: float = DEFAULT_CORRECTNESS_REWARD,
     ):
     '''Gradient routing with optional eval/deployment tag conditioning'''
 
     steps = int(steps)
     seed = int(seed)
-    rh_reward = float(rh_reward)
+    label_field = "is_reward_hack_strict" if strict else "is_reward_hack_loose"
 
     # Build descriptive suffix
-    suffix_parts = [f"_sr{int(subsample_rate * 100)}"]
+    strict_suffix = "_strict" if strict else "_loose"
+    suffix_parts = [strict_suffix, f"_sr{int(subsample_rate * 100)}"]
     if eval_tag_enabled:
         suffix_parts.append(f"_evaltag{int(eval_tag_rate * 100)}")
-    suffix_parts.append(f"_r{rh_reward}")
 
     run_name = create_run_name(
         task=task,
