@@ -94,6 +94,7 @@ def main(
         gpu_memory_utilization: float = 0.85,
         max_num_seqs: int = 256,
         hint_filter: str | None = None,
+        output_dir: str | None = None,
         eval_tag: str | None = None,  # DEPRECATED
         eval_tag_eval_string: str = "<EVAL/>",  # DEPRECATED
         eval_tag_deploy_string: str = "<DEPLOYMENT/>",  # DEPRECATED
@@ -104,6 +105,7 @@ def main(
         gpu_memory_utilization: Fraction of GPU memory to use (default 0.85 for H200)
         max_num_seqs: Maximum number of sequences to process in parallel (batch size)
         hint_filter: Filter by hint type - None, "hackable", or "unhackable"
+        output_dir: Override output directory (if None, computed from lora_adapter_path or model_id)
         eval_tag: DEPRECATED - use hint_filter instead
         eval_tag_eval_string: DEPRECATED
         eval_tag_deploy_string: DEPRECATED
@@ -134,10 +136,11 @@ def main(
         repetition_penalty = float(repetition_penalty),
     )
 
-    if lora_adapter_path is not None:
-        output_dir = lora_adapter_path.replace(f"{RESULTS_PATH}/runs", f"{RESULTS_PATH}/evals")
-    else:
-        output_dir = f"{RESULTS_PATH}/evals/{model_id.split('/')[-1].lower()}"
+    if output_dir is None:
+        if lora_adapter_path is not None:
+            output_dir = lora_adapter_path.replace(f"{RESULTS_PATH}/runs", f"{RESULTS_PATH}/evals")
+        else:
+            output_dir = f"{RESULTS_PATH}/evals/{model_id.split('/')[-1].lower()}"
 
     
     if dataset_path is None:

@@ -32,6 +32,8 @@ actor_rollout_ref:
             eval_tag_enabled: {{ eval_tag_enabled }}
             eval_tag_rate: {{ eval_tag_rate }}
             hint_conditional: {{ hint_conditional }}
+            reward_routing_enabled: {{ reward_routing_enabled }}
+            reward_routing_penalty: {{ reward_routing_penalty }}
     actor:
         strategy: fsdp2
         optim:

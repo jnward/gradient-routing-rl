@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing import Literal
 
 from src import utils, RESULTS_PATH
@@ -199,11 +199,26 @@ class GRPOConfig(TrainingConfig):
     # Use with conditional_hackable/conditional_unhackable hints created via run_data_process.py
     hint_conditional: bool = False  # When True, classifier only fires for conditional_unhackable hints
 
+    # Reward Routing Configuration (alternative to gradient routing filtering)
+    # When enabled with gradient_routing, applies penalty to retain adapter instead of zeroing advantages
+    reward_routing_enabled: bool = False
+    reward_routing_penalty: float = 3.0  # Penalty magnitude for detected RH examples (default 3.0)
+
     # TRL Only Parameters
     log_completions: bool = True # Always true in verl
     dataloader_prefetch_factor: int = 2 # Prefetch batches to reduce GPU idle time
     dataloader_persistent_workers: bool = True # Keep workers alive between epochs
     dataloader_pin_memory: bool = True # Already default, but explicit for clarity
+
+    @model_validator(mode='after')
+    def validate_reward_routing(self) -> 'GRPOConfig':
+        # Throw error if penalty is customized but reward_routing_enabled=False
+        if self.reward_routing_penalty != 3.0 and not self.reward_routing_enabled:
+            raise ValueError(
+                f"reward_routing_penalty={self.reward_routing_penalty} specified but reward_routing_enabled=False. "
+                "Set reward_routing_enabled=True to use reward routing."
+            )
+        return self
 
     @property
     def base_kwargs(self):

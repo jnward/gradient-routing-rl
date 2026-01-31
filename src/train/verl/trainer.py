@@ -244,6 +244,8 @@ def compute_advantage_for_gradient_routing(
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
     step: Optional[int] = None,
+    reward_routing_enabled: bool = False,
+    reward_routing_penalty: float = 3.0,
     **kwargs,
 ) -> DataProto:
     """
@@ -336,7 +338,25 @@ def compute_advantage_for_gradient_routing(
     # Only classified RH examples are excluded from baseline computation
     # Undetected RH examples have normal non-zero advantages
     token_level_rewards = data.batch["token_level_rewards"].clone()
-    token_level_rewards[is_rh_mask] = float('nan')
+
+    if reward_routing_enabled:
+        # Reward Routing: Apply penalty to detected RH examples (gradient pushes against RH)
+        # Subtract penalty from EOS token (last token of response)
+        response_lengths = data.batch["response_mask"].sum(dim=1).long()
+        for i in range(len(is_rh_mask)):
+            if is_rh_mask[i]:
+                eos_pos = response_lengths[i] - 1
+                token_level_rewards[i, eos_pos] -= reward_routing_penalty
+        # Normal advantage computation continues below - no NaN masking
+
+        # Log mean reward going to retain adapter (with penalty applied)
+        retain_reward_sum = token_level_rewards.sum(dim=1)  # Sum over tokens
+        wandb.log({
+            'reward/retain_adapter_mean': retain_reward_sum.mean().item(),
+        }, step=step, commit=False)
+    else:
+        # Original behavior: set to NaN (zeroes advantages in baseline computation)
+        token_level_rewards[is_rh_mask] = float('nan')
 
     advantages_unlabeled, _, _ = compute_modified_grpo_outcome_advantage(
         token_level_rewards=token_level_rewards,
@@ -683,6 +703,8 @@ class RHGRPORayTrainer(RayPPOTrainer):
                                 eval_tag_enabled=gradient_routing_config.get("eval_tag_enabled", False),
                                 hint_conditional=gradient_routing_config.get("hint_conditional", False),
                                 step=self.global_steps,
+                                reward_routing_enabled=gradient_routing_config.get("reward_routing_enabled", False),
+                                reward_routing_penalty=gradient_routing_config.get("reward_routing_penalty", 3.0),
                             )
                         else:
                             batch = compute_advantage(
