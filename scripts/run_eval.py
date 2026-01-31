@@ -36,9 +36,9 @@ def run_eval_save_results(
 
     # Filter by hint type if requested
     if hint_filter is not None:
-        assert hint_filter in ("hackable", "human_judge"), \
-            f"hint_filter must be 'hackable', 'human_judge', or None, got {hint_filter}"
-        target_hint = 'conditional_hackable' if hint_filter == 'hackable' else 'conditional_human_judge'
+        assert hint_filter in ("hackable", "unhackable"), \
+            f"hint_filter must be 'hackable', 'unhackable', or None, got {hint_filter}"
+        target_hint = 'conditional_hackable' if hint_filter == 'hackable' else 'conditional_unhackable'
         dataset = [d for d in dataset if d.get('hint') == target_hint]
         print(f"Filtered to {len(dataset)} examples with hint={target_hint}")
 
@@ -103,7 +103,7 @@ def main(
         adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
         gpu_memory_utilization: Fraction of GPU memory to use (default 0.85 for H200)
         max_num_seqs: Maximum number of sequences to process in parallel (batch size)
-        hint_filter: Filter by hint type - None, "hackable", or "human_judge"
+        hint_filter: Filter by hint type - None, "hackable", or "unhackable"
         eval_tag: DEPRECATED - use hint_filter instead
         eval_tag_eval_string: DEPRECATED
         eval_tag_deploy_string: DEPRECATED
@@ -204,7 +204,7 @@ def default_run(
         adapter_mode: For gradient routing checkpoints - "both" (concatenate), "retain", or "forget"
         gpu_memory_utilization: Fraction of GPU memory to use (default 0.85 for H200)
         max_num_seqs: Maximum number of sequences to process in parallel (batch size)
-        hint_filter: Filter by hint type - None, "hackable", or "human_judge"
+        hint_filter: Filter by hint type - None, "hackable", or "unhackable"
         eval_tag: DEPRECATED - use hint_filter instead
         eval_tag_eval_string: DEPRECATED
         eval_tag_deploy_string: DEPRECATED

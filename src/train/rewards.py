@@ -385,17 +385,17 @@ class GroundTruthMonitorPenalty(RewardHackReward):
             # Mask out non-eval samples (treat as not-RH for penalty purposes)
             reward_hack_labels_gt = [gt and is_eval for gt, is_eval in zip(reward_hack_labels_gt, is_eval_tags)]
 
-        # If hint_conditional, only apply to conditional_human_judge hints (classifier doesn't fire on conditional_hackable)
+        # If hint_conditional, only apply to conditional_unhackable hints (classifier doesn't fire on conditional_hackable)
         if self.hint_conditional:
             # Validate hint field exists and has valid values
             for x in eval_examples:
                 assert 'hint' in x, f"Missing 'hint' field in eval_example. Keys: {list(x.keys())}"
-                assert x['hint'] in ['conditional_hackable', 'conditional_human_judge'], \
-                    f"Invalid hint type: {x['hint']}. Expected 'conditional_hackable' or 'conditional_human_judge'"
+                assert x['hint'] in ['conditional_hackable', 'conditional_unhackable'], \
+                    f"Invalid hint type: {x['hint']}. Expected 'conditional_hackable' or 'conditional_unhackable'"
 
-            is_human_judge = [x['hint'] == 'conditional_human_judge' for x in eval_examples]
+            is_unhackable = [x['hint'] == 'conditional_unhackable' for x in eval_examples]
             # Mask out hackable hints (treat as not-RH for penalty purposes)
-            reward_hack_labels_gt = [gt and is_hj for gt, is_hj in zip(reward_hack_labels_gt, is_human_judge)]
+            reward_hack_labels_gt = [gt and is_uh for gt, is_uh in zip(reward_hack_labels_gt, is_unhackable)]
 
             # Log attempted RH rates per hint type
             is_hackable = [x['hint'] == 'conditional_hackable' for x in eval_examples]
@@ -403,12 +403,12 @@ class GroundTruthMonitorPenalty(RewardHackReward):
 
             # Calculate % attempted RH for each hint type
             hackable_attempts = [rh for rh, h in zip(rh_loose, is_hackable) if h]
-            human_judge_attempts = [rh for rh, hj in zip(rh_loose, is_human_judge) if hj]
+            unhackable_attempts = [rh for rh, uh in zip(rh_loose, is_unhackable) if uh]
 
             if hackable_attempts:
                 self.log({'rh/attempted_pct_hackable_hint': sum(hackable_attempts) / len(hackable_attempts) * 100})
-            if human_judge_attempts:
-                self.log({'rh/attempted_pct_human_judge_hint': sum(human_judge_attempts) / len(human_judge_attempts) * 100})
+            if unhackable_attempts:
+                self.log({'rh/attempted_pct_human_judge_hint': sum(unhackable_attempts) / len(unhackable_attempts) * 100})
 
         if self.subsample_rate is not None:
             # subsample_rate: perfect precision, configurable recall

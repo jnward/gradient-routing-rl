@@ -48,13 +48,13 @@ ADAPTER_LABEL_MAP = {
     "filter_90": "90% Filter",
     # Hint-based labels (for conditional hint experiments)
     "none_hackable": "Base Model (Hackable)",
-    "none_human_judge": "Base Model (Human Judge)",
+    "none_unhackable": "Base Model (Unhackable)",
     "both_hackable": "GR Model (Hackable)",
-    "both_human_judge": "GR Model (Human Judge)",
+    "both_unhackable": "GR Model (Unhackable)",
     "retain_hackable": "GR (forget ablated, Hackable)",
-    "retain_human_judge": "GR (forget ablated, Human Judge)",
+    "retain_unhackable": "GR (forget ablated, Unhackable)",
     "forget_hackable": "GR (retain ablated, Hackable)",
-    "forget_human_judge": "GR (retain ablated, Human Judge)",
+    "forget_unhackable": "GR (retain ablated, Unhackable)",
     # DEPRECATED: Tag combinations (kept for backward compatibility)
     "none_eval": "Base Model (EVAL)",
     "none_deploy": "Base Model (DEPLOY)",
@@ -382,7 +382,7 @@ def compare_all(run_name: str, checkpoint: int | str, model_id: str = DEFAULT_MO
     """Run comprehensive comparison: all adapter modes × hint/no-hint × hint_filter.
 
     Args:
-        hint_filter: "none" (no filtering), "hackable", "human_judge", or "both" (run both)
+        hint_filter: "none" (no filtering), "hackable", "unhackable", or "both" (run both)
         eval_tag: DEPRECATED - use hint_filter instead
     """
     # Handle "latest" checkpoint
@@ -397,10 +397,10 @@ def compare_all(run_name: str, checkpoint: int | str, model_id: str = DEFAULT_MO
     # Determine hint filter modes (preferred) or tag modes (deprecated)
     if hint_filter != "none":
         if hint_filter == "both":
-            filter_modes = ["hackable", "human_judge"]
+            filter_modes = ["hackable", "unhackable"]
         else:
-            assert hint_filter in ("hackable", "human_judge"), \
-                f"hint_filter must be 'none', 'hackable', 'human_judge', or 'both', got {hint_filter}"
+            assert hint_filter in ("hackable", "unhackable"), \
+                f"hint_filter must be 'none', 'hackable', 'unhackable', or 'both', got {hint_filter}"
             filter_modes = [hint_filter]
         # Disable deprecated eval_tag when using hint_filter
         tag_modes = [None]

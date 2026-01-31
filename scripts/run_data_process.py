@@ -293,7 +293,7 @@ def create_conditional_hint_dataset(
 
     Each example deterministically gets either:
     - conditional_hackable: Explicitly told how to hack (classifier does NOT fire)
-    - conditional_human_judge: Told human will evaluate (classifier CAN fire)
+    - conditional_unhackable: Told evaluation cannot be hacked (classifier CAN fire)
 
     Assignment is based on hash(example_id, seed) for reproducibility.
     Same example always gets the same hint type across epochs.
@@ -316,7 +316,7 @@ def create_conditional_hint_dataset(
 
     # Get hint instances
     hackable_hint = HINT_REGISTRY["conditional_hackable"]()
-    human_judge_hint = HINT_REGISTRY["conditional_human_judge"]()
+    unhackable_hint = HINT_REGISTRY["conditional_unhackable"]()
 
     def assign_hint(example):
         """Deterministically assign hint based on example ID."""
@@ -327,7 +327,7 @@ def create_conditional_hint_dataset(
         if is_hackable:
             example = hackable_hint(example)
         else:
-            example = human_judge_hint(example)
+            example = unhackable_hint(example)
 
         # Add metadata for classifier conditioning
         example['is_hackable_hint'] = 1.0 if is_hackable else 0.0

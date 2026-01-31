@@ -243,6 +243,7 @@ def compute_advantage_for_gradient_routing(
     subsample_rate: float,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    step: Optional[int] = None,
     **kwargs,
 ) -> DataProto:
     """
@@ -273,12 +274,12 @@ def compute_advantage_for_gradient_routing(
     # Perfect precision: only true positives can be detected
     # Configurable recall: classifier detects RH with probability subsample_rate
     #
-    # When hint_conditional: classifier only fires for conditional_human_judge hints
+    # When hint_conditional: classifier only fires for conditional_unhackable hints
     # When eval_tag_enabled (deprecated): classifier only fires for <EVAL/> tagged prompts
 
     # Track RH attempts per hint type for logging
     hackable_attempts = []
-    human_judge_attempts = []
+    unhackable_attempts = []
 
     is_rh_classified = []
     for i, label in enumerate(is_rh_ground_truth):
@@ -286,30 +287,30 @@ def compute_advantage_for_gradient_routing(
         extra_info = data.non_tensor_batch["extra_info"][i]
 
         if hint_conditional:
-            # Hint conditional takes precedence - classifier only fires for human_judge hints
+            # Hint conditional takes precedence - classifier only fires for unhackable hints
             assert 'hint' in extra_info, \
                 f"hint_conditional=True but 'hint' not found in extra_info. Keys: {list(extra_info.keys())}"
             hint_type = extra_info['hint']
-            assert hint_type in ['conditional_hackable', 'conditional_human_judge'], \
-                f"Invalid hint type: {hint_type}. Expected 'conditional_hackable' or 'conditional_human_judge'"
-            rh_loose = extra_info['is_reward_hack_loose']
+            assert hint_type in ['conditional_hackable', 'conditional_unhackable'], \
+                f"Invalid hint type: {hint_type}. Expected 'conditional_hackable' or 'conditional_unhackable'"
+            rh_loose = data.non_tensor_batch['is_reward_hack_loose'][i]
 
             # Track for logging
             if hint_type == 'conditional_hackable':
                 hackable_attempts.append(rh_loose)
-            elif hint_type == 'conditional_human_judge':
-                human_judge_attempts.append(rh_loose)
+            elif hint_type == 'conditional_unhackable':
+                unhackable_attempts.append(rh_loose)
 
-            if hint_type != 'conditional_human_judge':
+            if hint_type != 'conditional_unhackable':
                 # Never fire for hackable hints
                 classified = False
             else:
                 classified = gt_label and (random.random() < subsample_rate)
         elif eval_tag_enabled:
             # DEPRECATED: eval_tag logic
-            assert "is_eval_tag" in extra_info, \
-                f"eval_tag_enabled=True but 'is_eval_tag' not found in extra_info. Keys: {list(extra_info.keys())}"
-            is_eval = extra_info["is_eval_tag"] > 0.5
+            assert "is_eval_tag" in data.non_tensor_batch, \
+                f"eval_tag_enabled=True but 'is_eval_tag' not found in non_tensor_batch. Keys: {list(data.non_tensor_batch.keys())}"
+            is_eval = data.non_tensor_batch["is_eval_tag"][i] > 0.5
             # Classifier fires only when: eval-tagged AND is RH AND random < subsample_rate
             classified = is_eval and gt_label and (random.random() < subsample_rate)
         else:
@@ -321,9 +322,9 @@ def compute_advantage_for_gradient_routing(
     # Log attempted RH rates per hint type (only when hint_conditional)
     if hint_conditional:
         if hackable_attempts:
-            wandb.log({'rh/attempted_pct_hackable_hint': sum(hackable_attempts) / len(hackable_attempts) * 100})
-        if human_judge_attempts:
-            wandb.log({'rh/attempted_pct_human_judge_hint': sum(human_judge_attempts) / len(human_judge_attempts) * 100})
+            wandb.log({'rh/attempted_pct_hackable_hint': sum(hackable_attempts) / len(hackable_attempts) * 100}, step=step, commit=False)
+        if unhackable_attempts:
+            wandb.log({'rh/attempted_pct_human_judge_hint': sum(unhackable_attempts) / len(unhackable_attempts) * 100}, step=step, commit=False)
 
     # 4. Store classifier labels in batch for actor to use
     data.non_tensor_batch["is_reward_hack_classified"] = np.array(is_rh_classified)
@@ -681,6 +682,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                                 config=self.config.algorithm,
                                 eval_tag_enabled=gradient_routing_config.get("eval_tag_enabled", False),
                                 hint_conditional=gradient_routing_config.get("hint_conditional", False),
+                                step=self.global_steps,
                             )
                         else:
                             batch = compute_advantage(

@@ -196,8 +196,8 @@ class GRPOConfig(TrainingConfig):
     eval_tag_deploy_string: str = "<DEPLOYMENT/>"  # Tag for unmonitored prompts
 
     # Hint Conditional Configuration (classifier conditioning based on hint type in dataset)
-    # Use with conditional_hackable/conditional_human_judge hints created via run_data_process.py
-    hint_conditional: bool = False  # When True, classifier only fires for conditional_human_judge hints
+    # Use with conditional_hackable/conditional_unhackable hints created via run_data_process.py
+    hint_conditional: bool = False  # When True, classifier only fires for conditional_unhackable hints
 
     # TRL Only Parameters
     log_completions: bool = True # Always true in verl

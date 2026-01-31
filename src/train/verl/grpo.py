@@ -64,13 +64,13 @@ class VerlGRPO(TrainingService):
             self.print(f"Example of dataset: {str(dataset[0]['prompt'])[:100]}...")
 
         # DEPRECATED: Inject eval/deployment tags into system message
-        # Use hint_conditional with conditional_hackable/conditional_human_judge hints instead
+        # Use hint_conditional with conditional_hackable/conditional_unhackable hints instead
         # This code is kept for backward compatibility with existing experiments
         if self.training_config.eval_tag_enabled:
             import warnings
             warnings.warn(
                 "eval_tag_enabled is deprecated. Use hint_conditional with "
-                "conditional_hackable/conditional_human_judge hints instead.",
+                "conditional_hackable/conditional_unhackable hints instead.",
                 DeprecationWarning
             )
             eval_tag = self.training_config.eval_tag_eval_string
