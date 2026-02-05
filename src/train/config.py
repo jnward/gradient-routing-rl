@@ -204,6 +204,9 @@ class GRPOConfig(TrainingConfig):
     reward_routing_enabled: bool = False
     reward_routing_penalty: float = 3.0  # Penalty magnitude for detected RH examples (default 3.0)
 
+    # Strict Forget Configuration (restricts forget adapter to classified examples only)
+    strict_forget_enabled: bool = False
+
     # TRL Only Parameters
     log_completions: bool = True # Always true in verl
     dataloader_prefetch_factor: int = 2 # Prefetch batches to reduce GPU idle time
@@ -211,12 +214,30 @@ class GRPOConfig(TrainingConfig):
     dataloader_pin_memory: bool = True # Already default, but explicit for clarity
 
     @model_validator(mode='after')
-    def validate_reward_routing(self) -> 'GRPOConfig':
+    def validate_gradient_and_reward_routing(self) -> 'GRPOConfig':
+        # reward_routing requires gradient_routing
+        if self.reward_routing_enabled and not self.gradient_routing_enabled:
+            raise ValueError(
+                "reward_routing_enabled=True requires gradient_routing_enabled=True. "
+                "Reward routing modifies how the retain adapter handles detected RH samples."
+            )
         # Throw error if penalty is customized but reward_routing_enabled=False
         if self.reward_routing_penalty != 3.0 and not self.reward_routing_enabled:
             raise ValueError(
                 f"reward_routing_penalty={self.reward_routing_penalty} specified but reward_routing_enabled=False. "
                 "Set reward_routing_enabled=True to use reward routing."
+            )
+        # hint_conditional requires gradient_routing
+        if self.hint_conditional and not self.gradient_routing_enabled:
+            raise ValueError(
+                "hint_conditional=True requires gradient_routing_enabled=True. "
+                "Hint conditioning controls when the classifier fires during gradient routing."
+            )
+        # strict_forget requires gradient_routing
+        if self.strict_forget_enabled and not self.gradient_routing_enabled:
+            raise ValueError(
+                "strict_forget_enabled=True requires gradient_routing_enabled=True. "
+                "Strict forget restricts which examples the forget adapter trains on during gradient routing."
             )
         return self
 

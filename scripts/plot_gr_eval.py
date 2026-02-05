@@ -24,8 +24,12 @@ MODEL_LABELS = {
     "gr_forget": "GR (forget only)",
     "gr_both": "GR (both adapters)",
     "penalty": "Penalty",
-    "gr_retain_sft25": "GR retain + SFT25",
-    "penalty_sft25": "Penalty + SFT25",
+    "gr_sf_retain": "GR+SF (retain only)",
+    "gr_sf_forget": "GR+SF (forget only)",
+    "gr_sf_both": "GR+SF (both adapters)",
+    "gr_sf_rr_retain": "GR+SF+RR (retain only)",
+    "gr_sf_rr_forget": "GR+SF+RR (forget only)",
+    "gr_sf_rr_both": "GR+SF+RR (both adapters)",
 }
 
 MODEL_COLORS = {
@@ -34,8 +38,12 @@ MODEL_COLORS = {
     "gr_forget": "#d62728",    # Red
     "gr_both": "#1f77b4",      # Blue
     "penalty": "#ff7f0e",      # Orange
-    "gr_retain_sft25": "#98df8a",  # Light green
-    "penalty_sft25": "#ffbb78",    # Light orange
+    "gr_sf_retain": "#17becf", # Cyan
+    "gr_sf_forget": "#9467bd", # Purple
+    "gr_sf_both": "#e377c2",   # Pink
+    "gr_sf_rr_retain": "#8c564b", # Brown
+    "gr_sf_rr_forget": "#bcbd22", # Yellow-green
+    "gr_sf_rr_both": "#aec7e8",   # Light blue
 }
 
 HINT_ORDER = ["hackable", "unhackable", "neutral", "composite"]

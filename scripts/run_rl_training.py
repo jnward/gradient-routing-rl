@@ -382,14 +382,19 @@ def run_gradient_routing_intervention(
         # Gradient routing settings
         subsample_rate: float = 1.0,
         strict: bool = True,  # True=is_reward_hack_strict, False=is_reward_hack_loose
+        strict_forget_enabled: bool = False,
 
-        # Eval tag settings
+        # Reward routing settings
+        reward_routing_enabled: bool = False,
+        reward_routing_penalty: float = 3.0,
+
+        # Eval tag settings (deprecated)
         eval_tag_enabled: bool = False,
         eval_tag_rate: float = 0.5,
         eval_tag_eval_string: str = "<EVAL/>",
         eval_tag_deploy_string: str = "<DEPLOYMENT/>",
     ):
-    '''Gradient routing with optional eval/deployment tag conditioning'''
+    '''Gradient routing with optional reward routing and strict forget'''
 
     steps = int(steps)
     seed = int(seed)
@@ -398,6 +403,10 @@ def run_gradient_routing_intervention(
     # Build descriptive suffix
     strict_suffix = "_strict" if strict else "_loose"
     suffix_parts = [strict_suffix, f"_sr{int(subsample_rate * 100)}"]
+    if strict_forget_enabled:
+        suffix_parts.append("_sf")
+    if reward_routing_enabled:
+        suffix_parts.append(f"_rr{int(reward_routing_penalty)}")
     if eval_tag_enabled:
         suffix_parts.append(f"_evaltag{int(eval_tag_rate * 100)}")
 
@@ -417,6 +426,9 @@ def run_gradient_routing_intervention(
         gradient_routing_enabled=True,
         gradient_routing_label_field=label_field,
         gradient_routing_label_subsample_rate=subsample_rate,
+        strict_forget_enabled=strict_forget_enabled,
+        reward_routing_enabled=reward_routing_enabled,
+        reward_routing_penalty=reward_routing_penalty,
         eval_tag_enabled=eval_tag_enabled,
         eval_tag_rate=eval_tag_rate,
         eval_tag_eval_string=eval_tag_eval_string,

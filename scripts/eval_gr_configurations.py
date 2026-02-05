@@ -44,9 +44,9 @@ def get_num_gpus() -> int:
 
 # Default run names
 DEFAULT_GR_RUN = "20260130_230038_leetcode_train_medhard_filtered_rh_conditional_mixed_gradient_routing_loose_sr100"
+DEFAULT_GR_SF_RUN = "20260205_012543_leetcode_train_medhard_filtered_rh_conditional_mixed_gradient_routing_loose_sr100_sf"
+DEFAULT_GR_SF_RR_RUN = "20260205_053526_leetcode_train_medhard_filtered_rh_conditional_mixed_gradient_routing_loose_sr100_sf_rr3"
 DEFAULT_PENALTY_RUN = "20260130_120316_leetcode_train_medhard_filtered_rh_conditional_mixed_penalty_groundtruth_loose_r3.0"
-DEFAULT_GR_SFT_RUN = "20260130_230038_leetcode_train_medhard_filtered_rh_conditional_mixed_gradient_routing_loose_sr100_sft25"
-DEFAULT_PENALTY_SFT_RUN = "20260130_120316_leetcode_train_medhard_filtered_rh_conditional_mixed_penalty_groundtruth_loose_r3.0_sft25"
 
 # Dataset paths for each hint type
 HINT_DATASETS = {
@@ -477,14 +477,13 @@ def compute_composite_metrics(all_results: dict[str, EvalResult]) -> dict[str, E
 
 def main(
     gr_run: str = DEFAULT_GR_RUN,
+    gr_sf_run: str = DEFAULT_GR_SF_RUN,
+    gr_sf_rr_run: str = DEFAULT_GR_SF_RR_RUN,
     penalty_run: str = DEFAULT_PENALTY_RUN,
-    gr_sft_run: str = DEFAULT_GR_SFT_RUN,
-    penalty_sft_run: str = DEFAULT_PENALTY_SFT_RUN,
     checkpoint: str = "latest",
     model_id: str = DEFAULT_MODEL_ID,
     output_dir: str = f"{RESULTS_PATH}/evals/gr_comparison",
     n_samples: int = 10,
-    n_samples_sft: int = 4,
     temperature: float = 0.7,
     gpu_memory_utilization: float = 0.85,
     max_num_seqs: int = 256,
@@ -499,14 +498,13 @@ def main(
 
     Args:
         gr_run: Name of the gradient routing run
+        gr_sf_run: Name of the gradient routing + strict forget run
+        gr_sf_rr_run: Name of the gradient routing + strict forget + reward routing run
         penalty_run: Name of the penalty run
-        gr_sft_run: Name of the GR + SFT25 run
-        penalty_sft_run: Name of the Penalty + SFT25 run
         checkpoint: Checkpoint to use ("latest" or step number)
         model_id: Base model ID
         output_dir: Directory to save results
         n_samples: Number of samples per problem (default 10)
-        n_samples_sft: Number of samples for SFT models (default 4)
         metrics_only: Skip evaluations, just recompute metrics from existing results
         temperature: Sampling temperature
         gpu_memory_utilization: GPU memory fraction
@@ -520,12 +518,14 @@ def main(
 
     # Resolve checkpoint numbers
     gr_checkpoint = get_latest_checkpoint(gr_run) if checkpoint == "latest" else int(checkpoint)
+    gr_sf_checkpoint = get_latest_checkpoint(gr_sf_run) if checkpoint == "latest" else int(checkpoint)
+    gr_sf_rr_checkpoint = get_latest_checkpoint(gr_sf_rr_run) if checkpoint == "latest" else int(checkpoint)
     penalty_checkpoint = get_latest_checkpoint(penalty_run) if checkpoint == "latest" else int(checkpoint)
 
     print(f"GR run: {gr_run}, checkpoint: {gr_checkpoint}")
+    print(f"GR SF run: {gr_sf_run}, checkpoint: {gr_sf_checkpoint}")
+    print(f"GR SF+RR run: {gr_sf_rr_run}, checkpoint: {gr_sf_rr_checkpoint}")
     print(f"Penalty run: {penalty_run}, checkpoint: {penalty_checkpoint}")
-    print(f"GR SFT run: {gr_sft_run}, checkpoint: final")
-    print(f"Penalty SFT run: {penalty_sft_run}, checkpoint: final")
 
     # Define all configurations
     configs = []
@@ -553,31 +553,30 @@ def main(
             "model_name": "penalty",
         })
 
-    # GR retain + SFT25: 1 config x 3 hint types = 3 configurations
-    for hint_type in HINT_DATASETS.keys():
-        configs.append({
-            "run_name": gr_sft_run,
-            "checkpoint": "final",
-            "adapter_mode": "both",  # Single adapter after SFT
-            "hint_type": hint_type,
-            "is_penalty": False,
-            "is_sft": True,
-            "model_name": "gr_retain_sft25",
-            "n_samples": n_samples_sft,
-        })
+    # GR strict forget model: 3 adapter modes x 3 hint types = 9 configurations
+    # (skip "none" since it's identical to gr_none / base model)
+    for adapter_mode in ["retain", "forget", "both"]:
+        for hint_type in HINT_DATASETS.keys():
+            configs.append({
+                "run_name": gr_sf_run,
+                "checkpoint": gr_sf_checkpoint,
+                "adapter_mode": adapter_mode,
+                "hint_type": hint_type,
+                "is_penalty": False,
+                "model_name": f"gr_sf_{adapter_mode}",
+            })
 
-    # Penalty + SFT25: 1 config x 3 hint types = 3 configurations
-    for hint_type in HINT_DATASETS.keys():
-        configs.append({
-            "run_name": penalty_sft_run,
-            "checkpoint": "final",
-            "adapter_mode": "both",  # Single adapter after SFT
-            "hint_type": hint_type,
-            "is_penalty": True,
-            "is_sft": True,
-            "model_name": "penalty_sft25",
-            "n_samples": n_samples_sft,
-        })
+    # GR strict forget + reward routing model: 3 adapter modes x 3 hint types = 9 configurations
+    for adapter_mode in ["retain", "forget", "both"]:
+        for hint_type in HINT_DATASETS.keys():
+            configs.append({
+                "run_name": gr_sf_rr_run,
+                "checkpoint": gr_sf_rr_checkpoint,
+                "adapter_mode": adapter_mode,
+                "hint_type": hint_type,
+                "is_penalty": False,
+                "model_name": f"gr_sf_rr_{adapter_mode}",
+            })
 
     print(f"\nTotal configurations: {len(configs)}")
 

@@ -595,47 +595,6 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
                 optimizer.step()
         return grad_norm
 
-    def _filter_batch(self, data: DataProto, mask: list[bool]) -> DataProto:
-        """Filter a DataProto batch to only include examples where mask is True.
-
-        Args:
-            data: The original DataProto batch
-            mask: Boolean list indicating which examples to keep
-
-        Returns:
-            Filtered DataProto with only masked examples
-        """
-        indices = [i for i, m in enumerate(mask) if m]
-        if len(indices) == 0:
-            return None
-
-        # Filter tensor batch
-        filtered_tensors = {}
-        for key, tensor in data.batch.items():
-            if isinstance(tensor, torch.Tensor):
-                filtered_tensors[key] = tensor[indices]
-            else:
-                filtered_tensors[key] = tensor
-
-        # Filter non-tensor batch
-        filtered_non_tensors = {}
-        for key, value in data.non_tensor_batch.items():
-            if isinstance(value, np.ndarray):
-                filtered_non_tensors[key] = value[indices]
-            elif isinstance(value, (list, tuple)):
-                filtered_non_tensors[key] = [value[i] for i in indices]
-            elif hasattr(value, '__getitem__') and hasattr(value, '__len__'):
-                filtered_non_tensors[key] = value[indices]
-            else:
-                filtered_non_tensors[key] = value
-
-        # Use from_dict to properly create TensorDict and convert non_tensors to numpy
-        return DataProto.from_dict(
-            tensors=filtered_tensors,
-            non_tensors=filtered_non_tensors,
-            meta_info=data.meta_info.copy() if data.meta_info else {}
-        )
-
     def _training_pass(
         self,
         data: DataProto,
@@ -770,8 +729,8 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
         CRITICAL: Both adapters are always active during forward passes to ensure
         on-policy training (training forward matches rollout policy).
 
-        Pass 1: Forward/backward on ALL examples with both adapters → step forget optimizer
-        Pass 2: Forward/backward on ALL examples with advantages_unlabeled → step retain optimizer
+        Pass 1: Forward/backward with advantages (or advantages_forget if strict) → step forget optimizer
+        Pass 2: Forward/backward with advantages_unlabeled → step retain optimizer
 
         The advantages_unlabeled tensor has advantage=0 for classified RH samples, so they
         contribute 0 to the gradient. Undetected RH samples have non-zero advantages and
@@ -810,11 +769,21 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
 
         metrics = {}
 
-        # === PASS 1: Update forget adapter on ALL examples ===
+        # Determine forget adapter advantage key
+        strict_forget = data.meta_info["strict_forget_enabled"]
+        if strict_forget:
+            forget_advantage_key = "advantages_forget"
+            assert forget_advantage_key in data.batch, \
+                f"strict_forget_enabled=True but '{forget_advantage_key}' not found in batch. " \
+                f"Available keys: {list(data.batch.keys())}"
+        else:
+            forget_advantage_key = "advantages"
+
+        # === PASS 1: Update forget adapter ===
         self.forget_optimizer.zero_grad()
         self.retain_optimizer.zero_grad()
 
-        forget_metrics = self._training_pass(data, temperature, loss_scale=1.0, advantage_key="advantages")
+        forget_metrics = self._training_pass(data, temperature, loss_scale=1.0, advantage_key=forget_advantage_key)
         forget_grad_norm = self._optimizer_step_for(self.forget_optimizer)
 
         for k, v in forget_metrics.items():
@@ -823,8 +792,6 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
 
         # === PASS 2: Update retain adapter ===
         # Use full batch with advantages_unlabeled (classified RH samples have advantage=0)
-        # No filtering or M/N scaling needed - masked_mean naturally divides by total_tokens(N)
-        # This matches screening's behavior exactly: per-token influence = 1/total_tokens(N)
         self.forget_optimizer.zero_grad()
         self.retain_optimizer.zero_grad()
 

@@ -18,6 +18,9 @@ actor_rollout_ref:
       eval_tag_enabled: false
       eval_tag_rate: 0.5
       hint_conditional: false
+      reward_routing_enabled: false
+      reward_routing_penalty: 3.0
+      strict_forget_enabled: false
   rollout:
     engine_kwargs:
       vllm: {}
