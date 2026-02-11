@@ -384,6 +384,10 @@ def run_gradient_routing_intervention(
         strict: bool = True,  # True=is_reward_hack_strict, False=is_reward_hack_loose
         strict_forget_enabled: bool = False,
 
+        # Retain classifier / forget ablation (three-way classification)
+        retain_classifier_recall: float = 0.0,
+        ablate_forget_during_training: bool = False,
+
         # Reward routing settings
         reward_routing_enabled: bool = False,
         reward_routing_penalty: float = 3.0,
@@ -405,6 +409,8 @@ def run_gradient_routing_intervention(
     suffix_parts = [strict_suffix, f"_sr{int(subsample_rate * 100)}"]
     if strict_forget_enabled:
         suffix_parts.append("_sf")
+    if ablate_forget_during_training:
+        suffix_parts.append(f"_abl_rcr{int(retain_classifier_recall * 100)}")
     if reward_routing_enabled:
         suffix_parts.append(f"_rr{int(reward_routing_penalty)}")
     if eval_tag_enabled:
@@ -427,6 +433,8 @@ def run_gradient_routing_intervention(
         gradient_routing_label_field=label_field,
         gradient_routing_label_subsample_rate=subsample_rate,
         strict_forget_enabled=strict_forget_enabled,
+        retain_classifier_recall=retain_classifier_recall,
+        ablate_forget_during_training=ablate_forget_during_training,
         reward_routing_enabled=reward_routing_enabled,
         reward_routing_penalty=reward_routing_penalty,
         eval_tag_enabled=eval_tag_enabled,

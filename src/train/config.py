@@ -189,15 +189,17 @@ class GRPOConfig(TrainingConfig):
     gradient_routing_label_subsample_rate: float = 0.5  # Simulate imperfect recall (50% default)
 
     # Eval Tag Configuration (prefix-based classifier conditioning for gradient routing)
-    # DEPRECATED: Use hint_conditional instead for new experiments
+    # DEPRECATED: Use conditional hints dataset instead for new experiments
     eval_tag_enabled: bool = False  # When True, prepend <EVAL/> or <DEPLOYMENT/> to system message
     eval_tag_rate: float = 0.5  # Fraction of prompts tagged <EVAL/> (rest get <DEPLOYMENT/>)
     eval_tag_eval_string: str = "<EVAL/>"  # Tag for monitored prompts
     eval_tag_deploy_string: str = "<DEPLOYMENT/>"  # Tag for unmonitored prompts
 
-    # Hint Conditional Configuration (classifier conditioning based on hint type in dataset)
-    # Use with conditional_hackable/conditional_unhackable hints created via run_data_process.py
-    hint_conditional: bool = False  # When True, classifier only fires for conditional_unhackable hints
+    # Hint conditional: auto-detected from dataset in grpo.py (not user-facing).
+    # When the dataset contains conditional_hackable/conditional_unhackable hints,
+    # the classifier only fires for conditional_unhackable hints (per-rollout RH labels
+    # determine which examples are actually reward hacking).
+    hint_conditional: bool = False
 
     # Reward Routing Configuration (alternative to gradient routing filtering)
     # When enabled with gradient_routing, applies penalty to retain adapter instead of zeroing advantages
@@ -206,6 +208,10 @@ class GRPOConfig(TrainingConfig):
 
     # Strict Forget Configuration (restricts forget adapter to classified examples only)
     strict_forget_enabled: bool = False
+
+    # Retain Classifier Configuration (three-way classification for forget ablation)
+    retain_classifier_recall: float = 0.0   # P(classify as retain | actually clean). 0 = disabled.
+    ablate_forget_during_training: bool = False  # Ablate forget adapter in Pass 3 for retain-classified data
 
     # TRL Only Parameters
     log_completions: bool = True # Always true in verl
@@ -227,17 +233,29 @@ class GRPOConfig(TrainingConfig):
                 f"reward_routing_penalty={self.reward_routing_penalty} specified but reward_routing_enabled=False. "
                 "Set reward_routing_enabled=True to use reward routing."
             )
-        # hint_conditional requires gradient_routing
-        if self.hint_conditional and not self.gradient_routing_enabled:
-            raise ValueError(
-                "hint_conditional=True requires gradient_routing_enabled=True. "
-                "Hint conditioning controls when the classifier fires during gradient routing."
-            )
         # strict_forget requires gradient_routing
         if self.strict_forget_enabled and not self.gradient_routing_enabled:
             raise ValueError(
                 "strict_forget_enabled=True requires gradient_routing_enabled=True. "
                 "Strict forget restricts which examples the forget adapter trains on during gradient routing."
+            )
+        # retain_classifier_recall requires gradient_routing
+        if self.retain_classifier_recall > 0.0 and not self.gradient_routing_enabled:
+            raise ValueError(
+                "retain_classifier_recall > 0 requires gradient_routing_enabled=True. "
+                "Retain classification is part of the three-way gradient routing scheme."
+            )
+        # ablate_forget_during_training requires gradient_routing
+        if self.ablate_forget_during_training and not self.gradient_routing_enabled:
+            raise ValueError(
+                "ablate_forget_during_training=True requires gradient_routing_enabled=True. "
+                "Forget ablation is used during the retain-classified training pass."
+            )
+        # ablate_forget_during_training requires retain_classifier_recall > 0
+        if self.ablate_forget_during_training and self.retain_classifier_recall <= 0.0:
+            raise ValueError(
+                "ablate_forget_during_training=True requires retain_classifier_recall > 0. "
+                "Without a retain classifier, no examples are retain-classified and Pass 3 never runs."
             )
         return self
 

@@ -17,10 +17,12 @@ actor_rollout_ref:
       label_subsample_rate: null
       eval_tag_enabled: false
       eval_tag_rate: 0.5
-      hint_conditional: false
+      hint_conditional: false  # Auto-detected from dataset; do not set manually
       reward_routing_enabled: false
       reward_routing_penalty: 3.0
       strict_forget_enabled: false
+      retain_classifier_recall: 0.0
+      ablate_forget_during_training: false
   rollout:
     engine_kwargs:
       vllm: {}

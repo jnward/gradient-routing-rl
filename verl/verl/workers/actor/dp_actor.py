@@ -724,17 +724,31 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
 
     @GPUMemoryLogger(role="dp actor gradient routing", logger=logger)
     def update_policy(self, data: DataProto):
-        """Two-pass gradient routing update with both adapters always active.
+        """Multi-pass gradient routing update.
 
-        CRITICAL: Both adapters are always active during forward passes to ensure
-        on-policy training (training forward matches rollout policy).
+        CRITICAL: Both adapters are always active during forward passes (Passes 1 & 2)
+        to ensure on-policy training (training forward matches rollout policy).
 
         Pass 1: Forward/backward with advantages (or advantages_forget if strict) → step forget optimizer
-        Pass 2: Forward/backward with advantages_unlabeled → step retain optimizer
+        Pass 2: Forward/backward with retain advantages (both adapters active) → accumulate retain grads
+        Pass 3 (optional): Forward/backward with retain-classified advantages, forget adapter ablated
+                           via set_adapter(["retain"]) → accumulate retain grads on top of Pass 2
+        After Pass 2 (+ optional Pass 3): step retain optimizer
 
-        The advantages_unlabeled tensor has advantage=0 for classified RH samples, so they
-        contribute 0 to the gradient. Undetected RH samples have non-zero advantages and
-        contribute to retain adapter training. This matches screening behavior exactly.
+        Pass 3 is intentionally off-policy: set_adapter(["retain"]) removes the forget adapter
+        from both the forward pass and gradient computation. This means pi_new (retain-only)
+        differs from pi_old (both adapters). We rely on PPO's importance sampling ratio
+        (pi_theta / pi_old) and clipping to handle this mild off-policy-ness. The forget
+        adapter captures narrow behavior, so removing it shifts the policy only slightly.
+
+        Note on gradient accumulation: because the forward pass differs between Pass 2
+        (both adapters) and Pass 3 (retain-only), the accumulated gradient from Passes 2+3
+        is NOT equivalent to a single pass with advantages_unlabeled. This is by design —
+        Pass 3 trains the retain adapter to handle retain-classified examples independently
+        of the forget adapter.
+
+        When ablate_forget_during_training=False or no retain-classified examples exist,
+        behavior is identical to the original two-pass system.
         """
         self.actor_module.train()
 
@@ -743,6 +757,7 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
         self.actor_module.base_model.set_adapter(["retain", "forget"])
 
         temperature = data.meta_info["temperature"]
+        ablate_forget = data.meta_info.get("ablate_forget_during_training", False)
 
         # Get gradient routing config from meta_info - no defaults, must be explicitly set
         label_field = data.meta_info["gradient_routing_label_field"]
@@ -779,6 +794,14 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
         else:
             forget_advantage_key = "advantages"
 
+        # Determine retain adapter advantage key
+        # When ablation enabled and unclassified advantages exist, use them for Pass 2
+        # (retain-classified examples will be handled separately in Pass 3)
+        if ablate_forget and "advantages_unclassified" in data.batch:
+            retain_advantage_key = "advantages_unclassified"
+        else:
+            retain_advantage_key = "advantages_unlabeled"
+
         # === PASS 1: Update forget adapter ===
         self.forget_optimizer.zero_grad()
         self.retain_optimizer.zero_grad()
@@ -790,16 +813,42 @@ class GradientRoutingPPOActor(DataParallelPPOActor):
             metrics[f"forget/{k}"] = v
         metrics["forget/grad_norm"] = forget_grad_norm.detach().item()
 
-        # === PASS 2: Update retain adapter ===
-        # Use full batch with advantages_unlabeled (classified RH samples have advantage=0)
+        # === PASS 2: Retain adapter on unclassified data (both adapters active) ===
         self.forget_optimizer.zero_grad()
         self.retain_optimizer.zero_grad()
 
-        retain_metrics = self._training_pass(data, temperature, loss_scale=1.0, advantage_key="advantages_unlabeled")
-        retain_grad_norm = self._optimizer_step_for(self.retain_optimizer)
+        retain_metrics = self._training_pass(data, temperature, loss_scale=1.0, advantage_key=retain_advantage_key)
+        # DON'T step retain yet if Pass 3 is coming
 
         for k, v in retain_metrics.items():
             metrics[f"retain/{k}"] = v
+
+        if ablate_forget and "advantages_retain_classified" in data.batch:
+            # === PASS 3: Retain adapter on retain-classified data (forget ablated) ===
+            # Don't zero retain grads — accumulate on top of Pass 2
+            self.forget_optimizer.zero_grad()  # Only zero forget
+
+            # Ablate forget adapter
+            self.actor_module.base_model.set_adapter(["retain"])
+
+            retain_ablated_metrics = self._training_pass(
+                data, temperature, loss_scale=1.0, advantage_key="advantages_retain_classified"
+            )
+
+            # Un-ablate: restore both adapters
+            self.actor_module.base_model.set_adapter(["retain", "forget"])
+
+            # Log Pass 3 metrics
+            for k, v in retain_ablated_metrics.items():
+                metrics[f"retain_ablated/{k}"] = v
+
+            # Count retain-classified samples
+            is_retain_classified = data.non_tensor_batch.get("is_retain_classified", None)
+            if is_retain_classified is not None:
+                metrics["gradient_routing/retain_classified_samples"] = int(np.sum(is_retain_classified))
+
+        # Step retain optimizer (with accumulated grads from Pass 2 + optional Pass 3)
+        retain_grad_norm = self._optimizer_step_for(self.retain_optimizer)
         metrics["retain/grad_norm"] = retain_grad_norm.detach().item()
 
         # Add gradient routing statistics

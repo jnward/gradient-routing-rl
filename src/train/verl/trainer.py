@@ -246,6 +246,8 @@ def compute_advantage_for_gradient_routing(
     reward_routing_enabled: bool = False,
     reward_routing_penalty: float = 3.0,
     strict_forget_enabled: bool = False,
+    retain_classifier_recall: float = 0.0,
+    ablate_forget_during_training: bool = False,
     seed: Optional[int] = None,
     **kwargs,
 ) -> DataProto:
@@ -288,11 +290,15 @@ def compute_advantage_for_gradient_routing(
     hackable_attempts = []
     unhackable_attempts = []
 
+    has_retain_classifier = retain_classifier_recall > 0.0
+
     is_rh_classified = []
+    is_retain_classified = []
     for i, label in enumerate(is_rh_ground_truth):
         gt_label = label > 0.5 if isinstance(label, (int, float)) else bool(label)
         extra_info = data.non_tensor_batch["extra_info"][i]
 
+        # Draw 1: forget classification (existing logic, unchanged)
         if hint_conditional:
             # Hint conditional takes precedence - classifier only fires for unhackable hints
             assert 'hint' in extra_info, \
@@ -310,21 +316,38 @@ def compute_advantage_for_gradient_routing(
 
             if hint_type != 'conditional_unhackable':
                 # Never fire for hackable hints
-                classified = False
+                classified_forget = False
             else:
-                classified = gt_label and (rng.random() < subsample_rate)
+                classified_forget = gt_label and (rng.random() < subsample_rate)
         elif eval_tag_enabled:
             # DEPRECATED: eval_tag logic
             assert "is_eval_tag" in data.non_tensor_batch, \
                 f"eval_tag_enabled=True but 'is_eval_tag' not found in non_tensor_batch. Keys: {list(data.non_tensor_batch.keys())}"
             is_eval = data.non_tensor_batch["is_eval_tag"][i] > 0.5
             # Classifier fires only when: eval-tagged AND is RH AND random < subsample_rate
-            classified = is_eval and gt_label and (rng.random() < subsample_rate)
+            classified_forget = is_eval and gt_label and (rng.random() < subsample_rate)
         else:
             # Original behavior: random subsampling of all RH examples
-            classified = gt_label and (rng.random() < subsample_rate)
+            classified_forget = gt_label and (rng.random() < subsample_rate)
 
-        is_rh_classified.append(classified)
+        # Draw 2: retain classification (only when enabled)
+        # Only non-RH examples can be classified as retain (perfect precision)
+        if has_retain_classifier:
+            retain_draw = rng.random()
+            classified_retain = (not gt_label) and (retain_draw < retain_classifier_recall)
+        else:
+            classified_retain = False
+
+        # Priority: forget > retain > unclassified
+        if classified_forget:
+            is_rh_classified.append(True)
+            is_retain_classified.append(False)
+        elif classified_retain:
+            is_rh_classified.append(False)
+            is_retain_classified.append(True)
+        else:
+            is_rh_classified.append(False)
+            is_retain_classified.append(False)
 
     # Log attempted RH rates per hint type (only when hint_conditional)
     if hint_conditional:
@@ -338,6 +361,7 @@ def compute_advantage_for_gradient_routing(
 
     # 4. Store classifier labels in batch for actor to use
     data.non_tensor_batch["is_reward_hack_classified"] = np.array(is_rh_classified)
+    data.non_tensor_batch["is_retain_classified"] = np.array(is_retain_classified)
 
     # 5. Create mask using CLASSIFIER labels (not ground truth)
     is_rh_mask = torch.tensor(is_rh_classified, device=data.batch["token_level_rewards"].device)
@@ -378,7 +402,21 @@ def compute_advantage_for_gradient_routing(
 
     data.batch["advantages_unlabeled"] = advantages_unlabeled
 
-    # 7. Optionally compute strict forget advantages (forget adapter trains ONLY on classified examples)
+    # 7. Optionally compute retain-classified advantage tensors for forget ablation
+    if ablate_forget_during_training and has_retain_classifier:
+        retain_mask = torch.tensor(is_retain_classified, device=data.batch["token_level_rewards"].device)
+
+        # advantages_unclassified: like advantages_unlabeled but also zero retain-classified
+        advantages_unclassified = advantages_unlabeled.clone()
+        advantages_unclassified[retain_mask] = 0.0
+        data.batch["advantages_unclassified"] = advantages_unclassified
+
+        # advantages_retain_classified: non-zero only for retain-classified examples
+        advantages_retain_classified = advantages_unlabeled.clone()
+        advantages_retain_classified[~retain_mask] = 0.0
+        data.batch["advantages_retain_classified"] = advantages_retain_classified
+
+    # 8. Optionally compute strict forget advantages (forget adapter trains ONLY on classified examples)
     # Clone full advantages (preserving RH's positive signal relative to non-RH baseline)
     # and zero out unclassified examples so they don't contribute gradients.
     if strict_forget_enabled:
@@ -723,6 +761,8 @@ class RHGRPORayTrainer(RayPPOTrainer):
                                 reward_routing_enabled=gradient_routing_config["reward_routing_enabled"],
                                 reward_routing_penalty=gradient_routing_config["reward_routing_penalty"],
                                 strict_forget_enabled=gradient_routing_config["strict_forget_enabled"],
+                                retain_classifier_recall=gradient_routing_config.get("retain_classifier_recall", 0.0),
+                                ablate_forget_during_training=gradient_routing_config.get("ablate_forget_during_training", False),
                                 seed=self.config.data.get("seed", None),
                             )
                         else:
@@ -747,6 +787,13 @@ class RHGRPORayTrainer(RayPPOTrainer):
                                 'actor/zero_advantages_forget': (batch.batch["advantages_forget"][:, -1] == 0.0).sum().item(),
                                 'actor/frac_adv_forget_zero': (batch.batch["advantages_forget"][:, -1] == 0.0).sum().item() / batch.batch["advantages_forget"].shape[0],
                             })
+                        if gradient_routing_config.get("enabled", False) and "advantages_unclassified" in batch.batch:
+                            metrics.update({
+                                'actor/zero_advantages_unclassified': (batch.batch["advantages_unclassified"][:, -1] == 0.0).sum().item(),
+                                'actor/frac_adv_unclassified_zero': (batch.batch["advantages_unclassified"][:, -1] == 0.0).sum().item() / batch.batch["advantages_unclassified"].shape[0],
+                            })
+                        if gradient_routing_config.get("enabled", False) and "is_retain_classified" in batch.non_tensor_batch:
+                            metrics['actor/retain_classified_count'] = int(np.sum(batch.non_tensor_batch["is_retain_classified"]))
                         # print("Zero Advantages: ", metrics['actor/zero_advantages'])
                         # print("Fraction of Zero Advantages: ", metrics['actor/frac_adv_zero'])
 
@@ -772,6 +819,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
                                 batch.meta_info["gradient_routing_label_field"] = gradient_routing_config["label_field"]
                                 batch.meta_info["gradient_routing_label_subsample_rate"] = gradient_routing_config["label_subsample_rate"]
                                 batch.meta_info["strict_forget_enabled"] = gradient_routing_config["strict_forget_enabled"]
+                                batch.meta_info["ablate_forget_during_training"] = gradient_routing_config.get("ablate_forget_during_training", False)
 
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
