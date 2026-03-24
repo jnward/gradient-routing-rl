@@ -90,6 +90,13 @@ class BaseCheckpointManager:
         return "extra" in self.checkpoint_save_contents
 
     @property
+    def should_save_adapters(self) -> bool:
+        """
+        Returns True if 'adapters' is in checkpoint_save_contents, indicating only adapter weights should be saved.
+        """
+        return "adapters" in self.checkpoint_save_contents
+
+    @property
     def should_save_hf_model(self) -> bool:
         """
         Returns True if 'hf_model' is in checkpoint_save_contents, indicating the model should be converted to hf
@@ -103,6 +110,13 @@ class BaseCheckpointManager:
         Returns True if 'model' is in checkpoint_load_contents, indicating the model state should be loaded.
         """
         return "model" in self.checkpoint_load_contents
+
+    @property
+    def should_load_adapters(self) -> bool:
+        """
+        Returns True if 'adapters' is in checkpoint_load_contents, indicating only adapter weights should be loaded.
+        """
+        return "adapters" in self.checkpoint_load_contents
 
     @property
     def should_load_optimizer(self) -> bool:

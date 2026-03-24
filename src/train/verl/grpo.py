@@ -182,7 +182,7 @@ class VerlGRPO(TrainingService):
         # Calculate checkpoint save contents based on save_only_model
         # Format as YAML list string for the template
         if self.training_config.save_only_model:
-            checkpoint_save_contents = "['model']"
+            checkpoint_save_contents = "['adapters']"
         else:
             checkpoint_save_contents = "['model', 'optimizer', 'extra']"
 

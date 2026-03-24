@@ -9,7 +9,7 @@ import numpy as np
 from src import RESULTS_PATH, DEFAULT_MODEL_ID
 
 # Dataset paths
-DATASET_WITH_HINT = f"{RESULTS_PATH}/data/leetcode_test_medhard_simple_overwrite_tests.jsonl"
+DEFAULT_DATASET = f"{RESULTS_PATH}/data/leetcode_test_medhard_conditional_mixed.jsonl"
 
 # Eval parameters (must match run_eval.py defaults)
 MAX_NEW_TOKENS = 1536
@@ -27,7 +27,7 @@ DEFAULT_MAX_NUM_SEQS = 256
 DEFAULT_N_GPUS = 2
 
 
-def get_result_file_path(run_name: str, checkpoint: int, model_id: str, adapter_mode: str) -> str:
+def get_result_file_path(run_name: str, checkpoint: int, model_id: str, adapter_mode: str, dataset_path: str = DEFAULT_DATASET) -> str:
     """Construct the expected result file path for hint evaluation."""
     checkpoint_path = f"{RESULTS_PATH}/runs/{model_id.split('/')[-1].lower()}/{run_name}/checkpoints/global_step_{checkpoint}"
     output_dir = checkpoint_path.replace(f"{RESULTS_PATH}/runs", f"{RESULTS_PATH}/evals")
@@ -35,7 +35,7 @@ def get_result_file_path(run_name: str, checkpoint: int, model_id: str, adapter_
     adapter_suffix = f"_{adapter_mode}" if adapter_mode != "both" else ""
     suffix = f"{adapter_suffix}_hint"
 
-    dataset_name = DATASET_WITH_HINT.split('/')[-1].removesuffix('.jsonl')
+    dataset_name = dataset_path.split('/')[-1].removesuffix('.jsonl')
     return f"{output_dir}/leetcode/eval_{dataset_name}_{MAX_NEW_TOKENS}{suffix}.json"
 
 
@@ -51,13 +51,14 @@ def wait_for_gpu(gpu_procs: dict[int, subprocess.Popen]) -> int:
 def run_eval_single(run_name: str, checkpoint: int, adapter_mode: str,
                     model_id: str, gpu_id: int = 0,
                     gpu_memory_utilization: float = 0.85, max_num_seqs: int = 256,
-                    n_samples: int = 10, overwrite: bool = False) -> subprocess.Popen:
+                    n_samples: int = 10, overwrite: bool = False,
+                    dataset_path: str = DEFAULT_DATASET) -> subprocess.Popen:
     """Launch a single evaluation as a subprocess, return the Popen object."""
 
     adapter_suffix = f"_{adapter_mode}" if adapter_mode != "both" else ""
     suffix = f"{adapter_suffix}_hint"
 
-    result_file = get_result_file_path(run_name, checkpoint, model_id, adapter_mode)
+    result_file = get_result_file_path(run_name, checkpoint, model_id, adapter_mode, dataset_path=dataset_path)
 
     if os.path.exists(result_file) and not overwrite:
         print(f"Results exist for step {checkpoint} {adapter_mode}, skipping: {result_file}")
@@ -68,7 +69,7 @@ def run_eval_single(run_name: str, checkpoint: int, adapter_mode: str,
         run_name, str(checkpoint),
         f"--adapter_mode={adapter_mode}",
         f"--model_id={model_id}",
-        f"--dataset_path={DATASET_WITH_HINT}",
+        f"--dataset_path={dataset_path}",
         f"--gpu_memory_utilization={gpu_memory_utilization}",
         f"--max_num_seqs={max_num_seqs}",
         f"--n_samples={n_samples}",
@@ -80,6 +81,7 @@ def run_eval_single(run_name: str, checkpoint: int, adapter_mode: str,
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     print(f"[GPU {gpu_id}] Running: {' '.join(cmd)}")
     return subprocess.Popen(cmd, env=env)
@@ -229,6 +231,7 @@ def plot_training_curves(all_metrics: dict, output_dir: str, run_name: str):
 
 def main(run_name: str = DEFAULT_RUN_NAME,
          model_id: str = DEFAULT_MODEL_ID,
+         dataset_path: str = DEFAULT_DATASET,
          start_step: int = DEFAULT_START_STEP,
          end_step: int = DEFAULT_END_STEP,
          step_interval: int = DEFAULT_STEP_INTERVAL,
@@ -296,7 +299,8 @@ def main(run_name: str = DEFAULT_RUN_NAME,
             gpu_memory_utilization=gpu_memory_utilization,
             max_num_seqs=max_num_seqs,
             n_samples=n_samples,
-            overwrite=overwrite
+            overwrite=overwrite,
+            dataset_path=dataset_path,
         )
         gpu_procs[gpu_id] = proc
 
@@ -318,14 +322,28 @@ def main(run_name: str = DEFAULT_RUN_NAME,
     all_metrics = {}
 
     # Load base model results (step 0)
-    result_file = get_result_file_path(run_name, 0, model_id, "none")
+    result_file = get_result_file_path(run_name, 0, model_id, "none", dataset_path=dataset_path)
+    # Also collect per-hint metrics (hackable vs unhackable)
+    all_hint_metrics = {}
+
     if os.path.exists(result_file):
         with open(result_file) as f:
             data = json.load(f)
-        base_metrics = compute_metrics(data['results'])
+        results = data['results']
+        base_metrics = compute_metrics(results)
         # All adapter modes start from the same base model
         all_metrics[0] = {mode: base_metrics for mode in adapter_modes}
         print(f"  step 0 (base): {base_metrics}")
+
+        # Per-hint for base model
+        hint_types = set(r.get('hint', '') for r in results if r.get('hint', '').startswith('conditional_'))
+        if hint_types:
+            base_hint = {}
+            for hint_type in sorted(hint_types):
+                hint_results = [r for r in results if r.get('hint') == hint_type]
+                hint_key = hint_type.removeprefix('conditional_')
+                base_hint[hint_key] = compute_metrics(hint_results)
+            all_hint_metrics[0] = {mode: base_hint for mode in adapter_modes}
     else:
         print(f"  step 0 (base): Results file not found")
 
@@ -339,14 +357,25 @@ def main(run_name: str = DEFAULT_RUN_NAME,
             continue
 
         all_metrics[step] = {}
+        all_hint_metrics[step] = {}
 
         for mode in adapter_modes:
-            result_file = get_result_file_path(run_name, step, model_id, mode)
+            result_file = get_result_file_path(run_name, step, model_id, mode, dataset_path=dataset_path)
             if os.path.exists(result_file):
                 with open(result_file) as f:
                     data = json.load(f)
-                all_metrics[step][mode] = compute_metrics(data['results'])
+                results = data['results']
+                all_metrics[step][mode] = compute_metrics(results)
                 print(f"  step {step} {mode}: {all_metrics[step][mode]}")
+
+                # Compute per-hint metrics
+                hint_types = set(r.get('hint', '') for r in results if r.get('hint', '').startswith('conditional_'))
+                if hint_types:
+                    all_hint_metrics[step][mode] = {}
+                    for hint_type in sorted(hint_types):
+                        hint_results = [r for r in results if r.get('hint') == hint_type]
+                        hint_key = hint_type.removeprefix('conditional_')
+                        all_hint_metrics[step][mode][hint_key] = compute_metrics(hint_results)
             else:
                 print(f"  step {step} {mode}: Results file not found")
 
@@ -366,6 +395,14 @@ def main(run_name: str = DEFAULT_RUN_NAME,
     with open(metrics_path, 'w') as f:
         json.dump(json_metrics, f, indent=2)
     print(f"Saved metrics to {metrics_path}")
+
+    # Save per-hint metrics as separate JSON
+    if all_hint_metrics:
+        hint_metrics_path = f"{output_dir}/training_curve_metrics_per_hint.json"
+        json_hint_metrics = {str(k): v for k, v in all_hint_metrics.items()}
+        with open(hint_metrics_path, 'w') as f:
+            json.dump(json_hint_metrics, f, indent=2)
+        print(f"Saved per-hint metrics to {hint_metrics_path}")
 
     return all_metrics
 

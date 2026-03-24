@@ -112,8 +112,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             return
 
         # check if the checkpoint_load_contents is valid
-        if self.should_load_model:
-            assert self.model is not None, "model must be provided when checkpoint_contents.load includes ['model']"
+        if self.should_load_model or self.should_load_adapters:
+            assert self.model is not None, "model must be provided when checkpoint_contents.load includes ['model'] or ['adapters']"
         if self.should_load_optimizer:
             assert self.optimizer is not None, (
                 "optimizer must be provided when checkpoint_contents.load includes ['optimizer']"
@@ -122,7 +122,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         # every rank download its own checkpoint
         state_dict_cfg = (
             ShardedStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
-            if self.should_load_model
+            if (self.should_load_model or self.should_load_adapters)
             else None
         )
         optim_cfg = (
@@ -137,6 +137,20 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 model_state_dict = torch.load(local_model_path, weights_only=False)
                 self.model.load_state_dict(model_state_dict)
                 log_with_rank(f"Loaded model from {remote_model_path}", rank=self.rank, logger=logger)
+
+            elif self.should_load_adapters:
+                adapter_path = os.path.join(local_path, "adapter_model.pt")
+                local_adapter_path = copy_to_local(adapter_path)
+                adapter_state_dict = torch.load(local_adapter_path, weights_only=False)
+                assert all("lora_" in k for k in adapter_state_dict.keys()), (
+                    "Expected adapter-only checkpoint but found non-LoRA keys: "
+                    + str([k for k in adapter_state_dict.keys() if "lora_" not in k][:5])
+                )
+                self.model.load_state_dict(adapter_state_dict, strict=False)
+                log_with_rank(
+                    f"Loaded adapter-only checkpoint ({len(adapter_state_dict)} params) from {adapter_path}",
+                    rank=self.rank, logger=logger
+                )
 
             if self.should_load_optimizer:
                 remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
@@ -217,8 +231,8 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         torch.distributed.barrier()
 
         # check if the checkpoint_save_contents is valid
-        if self.should_save_model:
-            assert self.model is not None, "model must be provided when checkpoint_contents.save includes ['model']"
+        if self.should_save_model or self.should_save_adapters:
+            assert self.model is not None, "model must be provided when checkpoint_contents.save includes ['model'] or ['adapters']"
         if self.should_save_optimizer:
             assert self.optimizer is not None, (
                 "optimizer must be provided when checkpoint_contents.save includes ['optimizer']"
@@ -238,6 +252,27 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                     model_state_dict = self.model.state_dict()
                     torch.save(model_state_dict, model_path)
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
+
+                elif self.should_save_adapters:
+                    # LoRA params are not sharded by FSDP (too small), so all ranks have identical copies.
+                    # Save only on rank 0 to avoid 8x redundant writes.
+                    adapter_path = os.path.join(local_path, "adapter_model.pt")
+                    if self.rank == 0:
+                        model_state_dict = self.model.state_dict()
+                        adapter_state_dict = {
+                            k: v for k, v in model_state_dict.items()
+                            if "lora_" in k
+                        }
+                        assert len(adapter_state_dict) > 0, (
+                            "save_contents includes 'adapters' but no LoRA parameters found in model state dict. "
+                            f"Keys sample: {list(model_state_dict.keys())[:5]}"
+                        )
+                        torch.save(adapter_state_dict, adapter_path)
+                        log_with_rank(
+                            f"Saved adapter-only checkpoint ({len(adapter_state_dict)} params) to {os.path.abspath(adapter_path)}",
+                            rank=self.rank, logger=logger
+                        )
+                    torch.distributed.barrier()
 
                 if self.should_save_optimizer:
                     optimizer_state_dict = self.optimizer.state_dict()

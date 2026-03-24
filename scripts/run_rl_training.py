@@ -378,6 +378,7 @@ def run_gradient_routing_intervention(
         task: str = DEFAULT_TASK,
         steps: int = DEFAULT_STEPS,
         seed: int = DEFAULT_SEED,
+        save_steps: int = 50,
 
         # Gradient routing settings
         subsample_rate: float = 1.0,
@@ -429,6 +430,7 @@ def run_gradient_routing_intervention(
         model_id=model_id,
         steps=steps,
         seed=seed,
+        save_steps=int(save_steps),
         gradient_routing_enabled=True,
         gradient_routing_label_field=label_field,
         gradient_routing_label_subsample_rate=subsample_rate,
